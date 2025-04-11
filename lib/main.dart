@@ -5,8 +5,9 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'dart:async';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 import 'api_key.dart';
+//import 'package:flutter/foundation.dart';
+import 'dart:html' as html; // New import for web audio
 
 void main() {
   runApp(CompanionApp());
@@ -148,7 +149,9 @@ class _ChatScreenState extends State<ChatScreen> {
               _sendMessage(message).then((_) {
                 if (mounted) {
                   setState(() => _isProcessing = false);
+                  //
                   // initial delay set to 100
+                  //
                   Future.delayed(Duration(milliseconds: 100), () {
                     if (_isListening && mounted) _startListening();
                   });
@@ -231,6 +234,8 @@ class _ChatScreenState extends State<ChatScreen> {
   //
   Future<void> _sendMessage(String message) async {
     const url = 'http://localhost:8000/talk_api/';
+    const googleTtsUrl =
+        'https://texttospeech.googleapis.com/v1/text:synthesize';
     try {
       final response = await http.post(
         Uri.parse(url),
@@ -245,12 +250,49 @@ class _ChatScreenState extends State<ChatScreen> {
       final data = jsonDecode(response.body);
       setState(() => _reply = data['reply']);
       //
-      // create an audible response
+      // create an audible response with Google Cloud TTS
       //
-      final tts = FlutterTts();
-      await tts.setLanguage('en-US');
-      await tts.speak(_reply); // Speak the reply
+      final ttsResponse = await http.post(
+        Uri.parse(googleTtsUrl),
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Goog-Api-Key': googleApiKey, // From api_key.dart
+        },
+        body: jsonEncode({
+          'input': {'text': _reply}, // unsure about 'message'
+          'voice': {
+            'languageCode': 'en-US',
+            'name': 'en-US-News-L', // Warm female voice  / en-US-Wavenet-F
+          },
+          'audioConfig': {
+            'audioEncoding': 'MP3',
+            'speakingRate': 1.0,
+            'pitch': 0.0,
+          },
+        }),
+      );
+
+      if (ttsResponse.statusCode == 200) {
+        final ttsData = jsonDecode(ttsResponse.body);
+        String audioContent = ttsData['audioContent']; // Base64 MP3
+        // Play audio on web using dart:html
+        final blob = html.Blob([base64Decode(audioContent)]);
+        final url = html.Url.createObjectUrlFromBlob(blob);
+        final audio =
+            html.AudioElement()
+              ..src = url
+              ..autoplay = true;
+        html.document.body?.append(audio); // Add to DOM to play
+        audio.onEnded.listen((_) {
+          audio.remove(); // Clean up after playing
+          html.Url.revokeObjectUrl(url);
+        });
+      } else {
+        print('TTS Error: ${ttsResponse.statusCode} - ${ttsResponse.body}');
+        setState(() => _reply = 'Sorry, I can’t speak right now!');
+      }
     } catch (e) {
+      print(e.toString());
       setState(() => _reply = 'Oops, I can’t connect right now!');
     }
   }
