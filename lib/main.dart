@@ -29,6 +29,13 @@ class ChatScreen extends StatefulWidget {
   _ChatScreenState createState() => _ChatScreenState();
 }
 
+// How It’s Supposed to Work (Big Picture)
+// 1. Start: App loads → _initSpeech → mic on (_startListening).
+// 2. Listen: Mic waits up to 10m (listenFor), finalizes after 4s silence (pauseFor).
+// 3. Trigger: Hears “hey [message]” → strips “hey” → sends to _sendMessage.
+// 4. Reply: OpenAI responds → Google TTS speaks → mic restarts (100ms delay).
+// 5. Cycle: If silence or phrase ends, 2s delay (onStatus) → mic back on.
+// 6. Stop: User toggles off → mic stays off.
 class _ChatScreenState extends State<ChatScreen> {
   final TextEditingController _controller = TextEditingController();
   final SpeechToText _speech = SpeechToText();
@@ -95,43 +102,73 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   //
-  // Get speech started
+  // Expected Behavior
+  // Mic turns on at app start, stays on by restarting after each phrase or stop.
+  // Console logs: “listening” → “done” → 2s pause → “listening” cycle.
   //
   Future<void> _initSpeech() async {
+    //
+    // Prepares the mic — returns true if ready
+    //
     bool available = await _speech.initialize(
+      // Callback for mic state changes (e.g., “listening,” “done,” “notListening”).
+      // If mic stops (done = phrase ended, notListening = fully off) AND
+      // you want it on (_isListening) AND widget’s alive (mounted), wait 2000ms (2s),
+      // then restart via _startListening.
       onStatus: (status) {
         print('Speech status: $status');
         if ((status == 'done' || status == 'notListening') &&
             _isListening &&
             mounted) {
           // Delay to ensure previous session ends - set to 100 initially
-          Future.delayed(Duration(milliseconds: 2000), () {
+          Future.delayed(Duration(milliseconds: 200), () {
             if (_isListening && mounted) _startListening();
           });
         }
       },
+      // Logs issues (e.g., mic denied)—helps you debug.
       onError: (error) => print('Speech error: $error'),
     );
+    // if (available): If init succeeds, start listening immediately.
     if (available) {
       _startListening();
     } else {
+      // Else: Show a “can’t hear” message—user knows mic’s down.
       setState(() => _reply = 'Sorry, I can’t hear you yet!');
     }
   }
 
   //
-  // Start listening to the user
+  // Purpose: Core mic control—keeps it listening and processes “hey” triggers.
+  // Expected Behavior:
+  //  - Mic’s on → hears “hey [message]” → processes → speaks → restarts after 100ms.
+  //  - Console: “listening” → phrase → “done” (after 4s silence) → quick restart.
   //
   void _startListening() async {
+    // if (!_isListening && ...): If mic’s off, init it AND
+    // flag _isListening—UI updates (e.g., mic icon).
     if (!_isListening && await _speech.initialize()) {
       setState(() => _isListening = true);
     }
-    // Stop any lingering session first
+    // _speech.stop(): Stops any active session - prevents overlap errors on web.
     await _speech.stop();
-    await Future.delayed(Duration(milliseconds: 100)); // Small buffer of 50
+    // Future.delayed(10ms): Tiny buffer—lets web’s SpeechRecognition reset
+    await Future.delayed(Duration(milliseconds: 10)); // Small buffer of 50
     if (_isListening && mounted) {
+      // speech.listen(): Starts mic with:
+      // - listenFor: 10 minutes: Max duration—web might cap lower (e.g., Chrome ~10m)—keeps mic alive long-term.
+      // - pauseFor: <n> seconds: After <n>s silence, finalizes phrase—triggers onResult.
+      // - cancelOnError: false: Keeps going despite glitches—robust for elderly users.
+      // - partialResults: false: Waits for full phrase—cleaner input.
+      // - onResult:
+      // - - Stores Words: words = full phrase (e.g., “hey how’s it going”).
+      // - - Trigger Check: If starts with “hey” and not busy (_isProcessing), act:
+      // - - - Strip Trigger: message = “how’s it going”.
+      // - - - Send: Call _sendMessage—talks to OpenAI/Google TTS.
+      // - - - Post-Reply: After _sendMessage finishes (.then), reset _isProcessing, wait 100ms, restart listening.
+      // - - Empty Case: If just “hey” (no message), reset _isProcessing—no action.
       _speech.listen(
-        listenFor: Duration(minutes: 10),
+        listenFor: Duration(minutes: 10), // 10 "minutes: 10"
         pauseFor: Duration(seconds: 2),
         cancelOnError: false,
         partialResults: false,
@@ -144,6 +181,9 @@ class _ChatScreenState extends State<ChatScreen> {
           //
           if (words.startsWith(_triggerWord) && !_isProcessing) {
             setState(() => _isProcessing = true);
+            //
+            // Removes the trigger word.
+            //
             String message = words.replaceFirst(_triggerWord, '').trim();
             if (message.isNotEmpty) {
               _sendMessage(message).then((_) {
@@ -151,6 +191,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   setState(() => _isProcessing = false);
                   //
                   // initial delay set to 100
+                  // Too long? If mic’s off too much, play with the number to test responsiveness.
                   //
                   Future.delayed(Duration(milliseconds: 100), () {
                     if (_isListening && mounted) _startListening();
