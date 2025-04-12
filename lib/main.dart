@@ -156,7 +156,8 @@ class _ChatScreenState extends State<ChatScreen> {
     await Future.delayed(Duration(milliseconds: 10)); // Small buffer of 50
     if (_isListening && mounted) {
       // speech.listen(): Starts mic with:
-      // - listenFor: 10 minutes: Max duration—web might cap lower (e.g., Chrome ~10m)—keeps mic alive long-term.
+      // - listenFor: 10 minutes: Max duration—web might cap lower (e.g., Chrome ~10m) —
+      //   keeps mic alive long-term.
       // - pauseFor: <n> seconds: After <n>s silence, finalizes phrase—triggers onResult.
       // - cancelOnError: false: Keeps going despite glitches—robust for elderly users.
       // - partialResults: false: Waits for full phrase—cleaner input.
@@ -165,8 +166,11 @@ class _ChatScreenState extends State<ChatScreen> {
       // - - Trigger Check: If starts with “hey” and not busy (_isProcessing), act:
       // - - - Strip Trigger: message = “how’s it going”.
       // - - - Send: Call _sendMessage—talks to OpenAI/Google TTS.
-      // - - - Post-Reply: After _sendMessage finishes (.then), reset _isProcessing, wait 100ms, restart listening.
-      // - - Empty Case: If just “hey” (no message), reset _isProcessing—no action.
+      // - - - Post-Reply: After _sendMessage finishes (.then),
+      // - - - - reset _isProcessing,
+      // - - - - wait 100ms,
+      // - - - - restart listening.
+      // - - Empty Case: If just “hey” (no message), reset _isProcessing — no action.
       _speech.listen(
         listenFor: Duration(minutes: 10), // 10 "minutes: 10"
         pauseFor: Duration(seconds: 2),
@@ -207,6 +211,12 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  // How It Works
+  // Purpose: Manual mic off—via UI toggle.
+  //   _isListening = false: Stops auto-restart in _initSpeech’s onStatus.
+  //   _speech.stop(): Turns off mic immediately.
+  // Expected Behavior
+  //   Mic off, no restarts—UI shows “mic off” icon.
   void _stopListening() {
     setState(() => _isListening = false);
     _speech.stop();
