@@ -43,6 +43,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String _reply = '';
   String _temp = '';
   String _city = '';
+  String _units = 'imperial';
   String _formattedDateTime = '';
   String _lastWords = '';
   double? _lat;
@@ -259,24 +260,34 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   //
-  // Calls a third party weather API only
+  // Calls our weather API only
   // if our latitude and longitude are known
   //
   Future<void> _fetchWeather() async {
-    if (_lat == null || _lon == null) return;
+    if (_lat == null || _lon == null) {
+      setState(() => _temp = "No location");
+      return;
+    }
+
+    final url = Uri.parse(
+      'http://127.0.0.1:8000/weather_api/?lat=$_lat&lon=$_lon&units=$_units',
+    );
     try {
-      final response = await http.get(
-        Uri.parse(
-          'https://api.openweathermap.org/data/2.5/weather?lat=$_lat&lon=$_lon&appid=$weatherKey&units=imperial',
-        ),
-      );
-      final data = jsonDecode(response.body);
-      setState(() {
-        _temp = data['main']['temp'].toInt().toString();
-        _city = data['name'];
-      });
+      final response = await http.get(url);
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        setState(() {
+          _temp = data['temperature']?.toString() ?? "Unknown";
+          _city = data['city'] ?? "Unknown";
+          _units = data['units'] ?? _units;
+        });
+      } else {
+        final errorData = jsonDecode(response.body);
+        setState(() => _temp = errorData['error'] ?? "Error");
+      }
     } catch (e) {
-      setState(() => _temp = 'unknown');
+      setState(() => _temp = "Network error");
     }
   }
 
