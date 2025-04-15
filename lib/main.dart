@@ -6,8 +6,10 @@ import 'dart:async';
 import 'package:geolocator/geolocator.dart';
 import 'package:intl/intl.dart';
 import 'api_key.dart';
-//import 'package:flutter/foundation.dart';
 import 'dart:html' as html; // New import for web audio
+import 'package:shared_preferences/shared_preferences.dart';
+
+const String backendUrl = 'http://127.0.0.1:8000/api/v1/'; // Base URL for APIs
 
 void main() {
   runApp(CompanionApp());
@@ -18,8 +20,96 @@ class CompanionApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       title: 'Companion',
-      theme: ThemeData(primarySwatch: Colors.blue),
-      home: ChatScreen(),
+      theme: ThemeData(
+        primarySwatch: Colors.blue,
+        textTheme: TextTheme(
+          // Larger fonts for elderly users
+          bodyLarge: TextStyle(fontSize: 28),
+          bodyMedium: TextStyle(fontSize: 24),
+          labelLarge: TextStyle(fontSize: 20),
+        ),
+      ),
+      home: LoginScreen(), // Start with login
+    );
+  }
+}
+
+// New: Login screen for JWT authentication
+class LoginScreen extends StatefulWidget {
+  @override
+  _LoginScreenState createState() => _LoginScreenState();
+}
+
+class _LoginScreenState extends State<LoginScreen> {
+  final TextEditingController _usernameController = TextEditingController();
+  final TextEditingController _passwordController = TextEditingController();
+  String _error = '';
+
+  Future<void> _login() async {
+    final url = Uri.parse('${backendUrl}auth/token/');
+    try {
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+        body: {
+          'username': _usernameController.text,
+          'password': _passwordController.text,
+        },
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('access_token', data['access']);
+        await prefs.setString('refresh_token', data['refresh']);
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => ChatScreen()),
+        );
+      } else {
+        setState(() => _error = 'Login failed. Check credentials.');
+      }
+    } catch (e) {
+      setState(() => _error = 'Network error. Try again.');
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('Login')),
+      body: Padding(
+        padding: EdgeInsets.all(16),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            TextField(
+              controller: _usernameController,
+              decoration: InputDecoration(labelText: 'Username'),
+              style: TextStyle(fontSize: 24),
+            ),
+            SizedBox(height: 10),
+            TextField(
+              controller: _passwordController,
+              decoration: InputDecoration(labelText: 'Password'),
+              obscureText: true,
+              style: TextStyle(fontSize: 24),
+            ),
+            SizedBox(height: 20),
+            ElevatedButton(
+              onPressed: _login,
+              child: Text('Login', style: TextStyle(fontSize: 20)),
+            ),
+            if (_error.isNotEmpty)
+              Padding(
+                padding: EdgeInsets.only(top: 10),
+                child: Text(
+                  _error,
+                  style: TextStyle(color: Colors.red, fontSize: 20),
+                ),
+              ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -42,10 +132,13 @@ class _ChatScreenState extends State<ChatScreen> {
   final String _triggerWord = 'hey';
   String _reply = '';
   String _temp = '';
-  String _city = '';
+  String _city = 'Boston';
+  String _username = ''; // From user_profile
+  String _accountStatus = ''; // From user_profile
   String _units = 'imperial';
   String _formattedDateTime = '';
   String _lastWords = '';
+  String? _accessToken; // JWT token
   double? _lat;
   double? _lon;
   bool _showInput = false;
@@ -57,6 +150,11 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    //
+    // Load the access token
+    //
+    _loadToken();
+
     //
     // Initialize speech
     //
@@ -100,6 +198,87 @@ class _ChatScreenState extends State<ChatScreen> {
     _weatherTimer?.cancel();
     _speech.stop();
     super.dispose();
+  }
+
+  // New: Load JWT token
+  Future<void> _loadToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _accessToken = prefs.getString('access_token');
+    });
+    if (_accessToken == null) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => LoginScreen()),
+      );
+    }
+  }
+
+  // New: Fetch user_profile data
+  Future<void> _fetchUserProfile() async {
+    if (_accessToken == null) return;
+    final url = Uri.parse('${backendUrl}user_profile/');
+    try {
+      final response = await http.get(
+        url,
+        headers: {
+          'Authorization': 'Bearer $_accessToken',
+          'Content-Type': 'application/json',
+        },
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        setState(() {
+          _username = data['username'] ?? '';
+          _city = data['city'] ?? 'Boston';
+          _accountStatus = data['account_status'] ?? '';
+          _reply = 'Welcome, $_username!';
+        });
+      } else if (response.statusCode == 401) {
+        await _refreshToken();
+        await _fetchUserProfile(); // Retry
+      } else {
+        setState(() => _reply = 'Couldn’t load profile.');
+      }
+    } catch (e) {
+      setState(() => _reply = 'Network error fetching profile.');
+    }
+  }
+
+  // New: Refresh JWT token
+  Future<void> _refreshToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    final refreshToken = prefs.getString('refresh_token');
+    if (refreshToken == null) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => LoginScreen()),
+      );
+      return;
+    }
+    final url = Uri.parse('${backendUrl}auth/token/refresh/');
+    try {
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'refresh': refreshToken}),
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        await prefs.setString('access_token', data['access']);
+        setState(() => _accessToken = data['access']);
+      } else {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => LoginScreen()),
+        );
+      }
+    } catch (e) {
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => LoginScreen()),
+      );
+    }
   }
 
   //
@@ -227,6 +406,12 @@ class _ChatScreenState extends State<ChatScreen> {
   // Get the user location and weather data
   //
   Future<void> _fetchLocationAndWeather() async {
+    // Web fallback: Use user_profile city if geolocator fails
+    //bool isWeb = identical(0, 0.0); // Simple web check
+    //if (isWeb) {
+    //  await _fetchWeather();
+    //  return;
+    //}
     try {
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
@@ -270,7 +455,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
 
     final url = Uri.parse(
-      'http://127.0.0.1:8000/weather_api/?lat=$_lat&lon=$_lon&units=$_units',
+      '${backendUrl}weather/?lat=$_lat&lon=$_lon&units=$_units',
     );
     try {
       final response = await http.get(url);
@@ -284,7 +469,7 @@ class _ChatScreenState extends State<ChatScreen> {
         });
       } else {
         final errorData = jsonDecode(response.body);
-        setState(() => _temp = errorData['error'] ?? "Error");
+        setState(() => _temp = errorData['error'] ?? "Weather error");
       }
     } catch (e) {
       setState(() => _temp = "Network error");
@@ -295,37 +480,47 @@ class _ChatScreenState extends State<ChatScreen> {
   // Send a message to the backend API
   //
   Future<void> _sendMessage(String message) async {
-    const url = 'http://localhost:8000/talk_api/';
+    final url = Uri.parse('${backendUrl}talk/');
+    try {
+      final response = await http.post(
+        url,
+        headers: {
+          'Authorization': 'Bearer $_accessToken',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'message': message,
+          'city': _city, // Use user_profile city
+        }),
+      );
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        setState(() => _reply = data['reply'] ?? 'No response');
+        await _speakReply(data['reply']);
+      } else if (response.statusCode == 401) {
+        await _refreshToken();
+        await _sendMessage(message); // Retry
+      } else {
+        setState(() => _reply = 'Error: ${response.body}');
+      }
+    } catch (e) {
+      setState(() => _reply = 'Can’t connect to chat service.');
+    }
+  }
+
+  Future<void> _speakReply(String text) async {
     const googleTtsUrl =
         'https://texttospeech.googleapis.com/v1/text:synthesize';
     try {
-      final response = await http.post(
-        Uri.parse(url),
-        body: {
-          'message': message,
-          'my_lat': _lat.toString(),
-          'my_lon': _lon.toString(),
-          'timestamp': DateTime.now().millisecondsSinceEpoch.toString(),
-          'city': _city,
-        },
-      );
-      final data = jsonDecode(response.body);
-      setState(() => _reply = data['reply']);
-      //
-      // create an audible response with Google Cloud TTS
-      //
       final ttsResponse = await http.post(
         Uri.parse(googleTtsUrl),
         headers: {
           'Content-Type': 'application/json',
-          'X-Goog-Api-Key': googleApiKey, // From api_key.dart
+          'X-Goog-Api-Key': googleApiKey,
         },
         body: jsonEncode({
-          'input': {'text': _reply}, // unsure about 'message'
-          'voice': {
-            'languageCode': 'en-US',
-            'name': 'en-US-News-L', // Warm female voice  / en-US-Wavenet-F
-          },
+          'input': {'text': text},
+          'voice': {'languageCode': 'en-US', 'name': 'en-US-News-L'},
           'audioConfig': {
             'audioEncoding': 'MP3',
             'speakingRate': 1.0,
@@ -333,29 +528,25 @@ class _ChatScreenState extends State<ChatScreen> {
           },
         }),
       );
-
       if (ttsResponse.statusCode == 200) {
         final ttsData = jsonDecode(ttsResponse.body);
-        String audioContent = ttsData['audioContent']; // Base64 MP3
-        // Play audio on web using dart:html
+        final audioContent = ttsData['audioContent'];
         final blob = html.Blob([base64Decode(audioContent)]);
         final url = html.Url.createObjectUrlFromBlob(blob);
         final audio =
             html.AudioElement()
               ..src = url
               ..autoplay = true;
-        html.document.body?.append(audio); // Add to DOM to play
+        html.document.body?.append(audio);
         audio.onEnded.listen((_) {
-          audio.remove(); // Clean up after playing
+          audio.remove();
           html.Url.revokeObjectUrl(url);
         });
       } else {
-        print('TTS Error: ${ttsResponse.statusCode} - ${ttsResponse.body}');
         setState(() => _reply = 'Sorry, I can’t speak right now!');
       }
     } catch (e) {
-      print(e.toString());
-      setState(() => _reply = 'Oops, I can’t connect right now!');
+      setState(() => _reply = 'Speech error. Try again.');
     }
   }
 
@@ -400,7 +591,9 @@ class _ChatScreenState extends State<ChatScreen> {
                   // The text response from the API is shown here
                   //
                   Text(
-                    _reply.isNotEmpty ? _reply : 'Hello, I’m here for you!',
+                    _reply.isNotEmpty
+                        ? _reply
+                        : 'Hello, ${_username.isNotEmpty ? _username : "friend"}!',
                     style: TextStyle(
                       fontSize: 24,
                       color: Colors.white,
@@ -428,7 +621,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 Text(
                   _temp != 'unknown' ? 'It’s $_temp°F in $_city' : '',
                   style: TextStyle(
-                    fontSize: 24,
+                    fontSize: 28,
                     color: Colors.cyanAccent,
                     shadows: [
                       Shadow(
@@ -462,7 +655,18 @@ class _ChatScreenState extends State<ChatScreen> {
                   onPressed:
                       () => Navigator.push(
                         context,
-                        MaterialPageRoute(builder: (_) => SettingsScreen()),
+                        MaterialPageRoute(
+                          builder:
+                              (_) => SettingsScreen(
+                                username: _username,
+                                city: _city,
+                                accountStatus: _accountStatus,
+                                showCaptions: _showCaptions,
+                                onCaptionsChanged: (value) {
+                                  setState(() => _showCaptions = value);
+                                },
+                              ),
+                        ),
                       ),
                   child: Icon(Icons.settings),
                 ),
@@ -563,6 +767,20 @@ class _ChatScreenState extends State<ChatScreen> {
 // Creates our settings screen's widget tree for its UI
 //
 class SettingsScreen extends StatelessWidget {
+  final String username;
+  final String city;
+  final String accountStatus;
+  final bool showCaptions;
+  final ValueChanged<bool> onCaptionsChanged;
+
+  SettingsScreen({
+    required this.username,
+    required this.city,
+    required this.accountStatus,
+    required this.showCaptions,
+    required this.onCaptionsChanged,
+  });
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
