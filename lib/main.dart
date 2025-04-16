@@ -43,7 +43,16 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
+  final TextEditingController _cityController = TextEditingController(); // New
+  final TextEditingController _preferredNameController =
+      TextEditingController(); // New
+  final TextEditingController _securityAnswerController =
+      TextEditingController(); // New
+  final TextEditingController _newPasswordController =
+      TextEditingController(); // New
   String _error = '';
+  bool _isSignUp = false;
+  bool _isResetPassword = false;
 
   Future<void> _login() async {
     final url = Uri.parse('${backendUrl}auth/token/');
@@ -56,6 +65,7 @@ class _LoginScreenState extends State<LoginScreen> {
           'password': _passwordController.text,
         },
       );
+      print('Login response: ${response.statusCode} ${response.body}');
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final prefs = await SharedPreferences.getInstance();
@@ -69,6 +79,74 @@ class _LoginScreenState extends State<LoginScreen> {
         setState(() => _error = 'Login failed. Check credentials.');
       }
     } catch (e) {
+      print('Login error: $e');
+      setState(() => _error = 'Network error. Try again.');
+    }
+  }
+
+  // new
+  Future<void> _signUp() async {
+    if (_preferredNameController.text.isEmpty) {
+      setState(() => _error = 'Please enter your preferred name.');
+      return;
+    }
+    if (_securityAnswerController.text.isEmpty) {
+      setState(() => _error = 'Please enter a security answer.');
+      return;
+    }
+    final url = Uri.parse('${backendUrl}auth/register/');
+    try {
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'username': _usernameController.text,
+          'password': _passwordController.text,
+          'preferred_name': _preferredNameController.text,
+          'city':
+              _cityController.text.isNotEmpty ? _cityController.text : 'Boston',
+          'security_answer': _securityAnswerController.text,
+        }),
+      );
+      print('SignUp response: ${response.statusCode} ${response.body}');
+      if (response.statusCode == 201) {
+        setState(() {
+          _error = 'Account created! Please log in.';
+          _isSignUp = false;
+          _isResetPassword = false;
+        });
+      } else {
+        setState(() => _error = 'Sign-up failed: ${response.body}');
+      }
+    } catch (e) {
+      print('SignUp error: $e');
+      setState(() => _error = 'Network error. Try again.');
+    }
+  }
+
+  Future<void> _resetPassword() async {
+    final url = Uri.parse('${backendUrl}auth/password_reset/');
+    try {
+      final response = await http.post(
+        url,
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({
+          'username': _usernameController.text,
+          'security_answer': _securityAnswerController.text,
+          'new_password': _newPasswordController.text,
+        }),
+      );
+      print('Password reset response: ${response.statusCode} ${response.body}');
+      if (response.statusCode == 200) {
+        setState(() {
+          _error = 'Password reset! Please log in.';
+          _isResetPassword = false;
+        });
+      } else {
+        setState(() => _error = 'Reset failed: ${response.body}');
+      }
+    } catch (e) {
+      print('Reset error: $e');
       setState(() => _error = 'Network error. Try again.');
     }
   }
@@ -76,7 +154,15 @@ class _LoginScreenState extends State<LoginScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: Text('Login')),
+      appBar: AppBar(
+        title: Text(
+          _isSignUp
+              ? 'Sign Up'
+              : _isResetPassword
+              ? 'Reset Password'
+              : 'Login',
+        ),
+      ),
       body: Padding(
         padding: EdgeInsets.all(16),
         child: Column(
@@ -84,20 +170,98 @@ class _LoginScreenState extends State<LoginScreen> {
           children: [
             TextField(
               controller: _usernameController,
-              decoration: InputDecoration(labelText: 'Username'),
+              decoration: InputDecoration(labelText: 'Username (required)'),
               style: TextStyle(fontSize: 24),
             ),
             SizedBox(height: 10),
-            TextField(
-              controller: _passwordController,
-              decoration: InputDecoration(labelText: 'Password'),
-              obscureText: true,
-              style: TextStyle(fontSize: 24),
-            ),
+            if (!_isResetPassword)
+              TextField(
+                controller: _passwordController,
+                decoration: InputDecoration(labelText: 'Password (required)'),
+                obscureText: true,
+                style: TextStyle(fontSize: 24),
+              ),
+            if (_isSignUp) ...[
+              SizedBox(height: 10),
+              TextField(
+                controller: _preferredNameController,
+                decoration: InputDecoration(
+                  labelText: 'Preferred Name (required)',
+                ),
+                style: TextStyle(fontSize: 24),
+              ),
+              SizedBox(height: 10),
+              TextField(
+                controller: _cityController,
+                decoration: InputDecoration(labelText: 'City (optional)'),
+                style: TextStyle(fontSize: 24),
+              ),
+              SizedBox(height: 10),
+              TextField(
+                controller: _securityAnswerController,
+                decoration: InputDecoration(
+                  labelText:
+                      'Security Answer (e.g., First pet’s name, required)',
+                ),
+                style: TextStyle(fontSize: 24),
+              ),
+            ],
+            if (_isResetPassword) ...[
+              SizedBox(height: 10),
+              TextField(
+                controller: _securityAnswerController,
+                decoration: InputDecoration(
+                  labelText: 'Security Answer (e.g., First pet’s name)',
+                ),
+                style: TextStyle(fontSize: 24),
+              ),
+              SizedBox(height: 10),
+              TextField(
+                controller: _newPasswordController,
+                decoration: InputDecoration(labelText: 'New Password'),
+                obscureText: true,
+                style: TextStyle(fontSize: 24),
+              ),
+            ],
             SizedBox(height: 20),
             ElevatedButton(
-              onPressed: _login,
-              child: Text('Login', style: TextStyle(fontSize: 20)),
+              onPressed: () {
+                if (_isSignUp) {
+                  _signUp();
+                } else if (_isResetPassword) {
+                  _resetPassword();
+                } else {
+                  _login();
+                }
+              },
+              child: Text(
+                _isSignUp
+                    ? 'Create Account'
+                    : _isResetPassword
+                    ? 'Reset Password'
+                    : 'Login',
+                style: TextStyle(fontSize: 20),
+              ),
+            ),
+            TextButton(
+              onPressed: () => setState(() => _isSignUp = !_isSignUp),
+              child: Text(
+                _isSignUp
+                    ? 'Already have an account? Login'
+                    : 'Need an account? Sign Up',
+                style: TextStyle(fontSize: 20, color: Colors.blue),
+              ),
+            ),
+            TextButton(
+              onPressed:
+                  () => setState(() {
+                    _isResetPassword = !_isResetPassword;
+                    if (!_isResetPassword) _isSignUp = false;
+                  }),
+              child: Text(
+                _isResetPassword ? 'Back to Login' : 'Forgot Password?',
+                style: TextStyle(fontSize: 20, color: Colors.blue),
+              ),
             ),
             if (_error.isNotEmpty)
               Padding(
@@ -133,7 +297,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String _reply = '';
   String _temp = '';
   String _city = 'Boston';
-  String _username = ''; // From user_profile
+  String _preferredName = ''; // From user_profile
   String _accountStatus = ''; // From user_profile
   String _units = 'imperial';
   String _formattedDateTime = '';
@@ -153,17 +317,14 @@ class _ChatScreenState extends State<ChatScreen> {
     //
     // Load the access token
     //
-    _loadToken();
-
-    //
-    // Initialize speech
-    //
-    _initSpeech();
-
-    //
-    // Initialize the location and weather data
-    //
-    _fetchLocationAndWeather();
+    //_loadToken();
+    _loadToken().then((_) {
+      if (_accessToken != null && mounted) {
+        _fetchUserProfile();
+      }
+      _initSpeech();
+      _fetchLocationAndWeather();
+    });
 
     //
     // Set up a 15 minute timer to check the weather
@@ -229,11 +390,15 @@ class _ChatScreenState extends State<ChatScreen> {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         setState(() {
-          _username = data['username'] ?? '';
+          _preferredName = data['preferred_name']?.toString() ?? '';
           _city = data['city'] ?? 'Boston';
-          _accountStatus = data['account_status'] ?? '';
-          _reply = 'Welcome, $_username!';
+          _accountStatus = data['account_status']?.toString() ?? '';
+          _reply =
+              _preferredName.isNotEmpty
+                  ? 'Welcome, $_preferredName!'
+                  : 'Welcome!';
         });
+        _speakReply("Welcome $_preferredName! I am happy to see you.");
       } else if (response.statusCode == 401) {
         await _refreshToken();
         await _fetchUserProfile(); // Retry
@@ -593,7 +758,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   Text(
                     _reply.isNotEmpty
                         ? _reply
-                        : 'Hello, ${_username.isNotEmpty ? _username : "friend"}!',
+                        : 'Hello, ${_preferredName.isNotEmpty ? _preferredName : "friend"}!',
                     style: TextStyle(
                       fontSize: 24,
                       color: Colors.white,
@@ -658,7 +823,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         MaterialPageRoute(
                           builder:
                               (_) => SettingsScreen(
-                                username: _username,
+                                preferredName: _preferredName,
                                 city: _city,
                                 accountStatus: _accountStatus,
                                 showCaptions: _showCaptions,
@@ -766,15 +931,15 @@ class _ChatScreenState extends State<ChatScreen> {
 //
 // Creates our settings screen's widget tree for its UI
 //
-class SettingsScreen extends StatelessWidget {
-  final String username;
+class SettingsScreen extends StatefulWidget {
+  final String preferredName;
   final String city;
   final String accountStatus;
   final bool showCaptions;
   final ValueChanged<bool> onCaptionsChanged;
 
   SettingsScreen({
-    required this.username,
+    required this.preferredName,
     required this.city,
     required this.accountStatus,
     required this.showCaptions,
@@ -782,42 +947,155 @@ class SettingsScreen extends StatelessWidget {
   });
 
   @override
+  _SettingsScreenState createState() => _SettingsScreenState();
+}
+
+class _SettingsScreenState extends State<SettingsScreen> {
+  bool _isChangePassword = false;
+  final TextEditingController _oldPasswordController = TextEditingController();
+  final TextEditingController _newPasswordController = TextEditingController();
+  String _error = '';
+
+  Future<void> _changePassword() async {
+    final url = Uri.parse('${backendUrl}auth/password_change/');
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('access_token');
+    try {
+      final response = await http.post(
+        url,
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({
+          'old_password': _oldPasswordController.text,
+          'new_password': _newPasswordController.text,
+        }),
+      );
+      print(
+        'Password change response: ${response.statusCode} ${response.body}',
+      );
+      if (response.statusCode == 200) {
+        setState(() {
+          _error = 'Password changed successfully!';
+          _isChangePassword = false;
+          _oldPasswordController.clear();
+          _newPasswordController.clear();
+        });
+      } else {
+        setState(() => _error = 'Change failed: ${response.body}');
+      }
+    } catch (e) {
+      print('Change password error: $e');
+      setState(() => _error = 'Network error. Try again.');
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(title: Text('Settings')),
       body: Stack(
         children: [
-          // Background image
           Positioned.fill(
             child: Image.asset(
               'assets/room_sunny_night.png',
-              fit:
-                  BoxFit
-                      .cover, // Fill screen, maintain aspect ratio, crop if needed
-              width: double.infinity, // Ensure it spans full width
-              height: double.infinity, // Ensure it spans full height
+              fit: BoxFit.cover,
             ),
           ),
           Positioned.fill(
-            child: Container(
-              color: Colors.black.withOpacity(0.4), // adjust opacity as needed
-            ),
+            child: Container(color: Colors.black.withOpacity(0.4)),
           ),
-          // Foreground content
           Padding(
             padding: EdgeInsets.all(16),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 Text(
-                  'Account and Settings',
+                  'Hello, ${widget.preferredName.isNotEmpty ? widget.preferredName : 'User'}!',
                   style: TextStyle(
-                    fontSize: 24,
-                    color: Colors.white, // Adjust for readability
+                    fontSize: 28,
+                    color: Colors.white,
                     fontWeight: FontWeight.bold,
                   ),
                 ),
-                // Add more settings widgets here
+                SizedBox(height: 20),
+                Text(
+                  'City: ${widget.city}',
+                  style: TextStyle(fontSize: 24, color: Colors.white),
+                ),
+                Text(
+                  'Account Status: ${widget.accountStatus == 'A' ? 'Active' : 'Suspended'}',
+                  style: TextStyle(fontSize: 24, color: Colors.white),
+                ),
+                SizedBox(height: 20),
+                if (_isChangePassword) ...[
+                  TextField(
+                    controller: _oldPasswordController,
+                    decoration: InputDecoration(labelText: 'Old Password'),
+                    obscureText: true,
+                    style: TextStyle(fontSize: 24, color: Colors.white),
+                  ),
+                  SizedBox(height: 10),
+                  TextField(
+                    controller: _newPasswordController,
+                    decoration: InputDecoration(labelText: 'New Password'),
+                    obscureText: true,
+                    style: TextStyle(fontSize: 24, color: Colors.white),
+                  ),
+                  SizedBox(height: 20),
+                  ElevatedButton(
+                    onPressed: _changePassword,
+                    child: Text(
+                      'Change Password',
+                      style: TextStyle(fontSize: 20),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed: () => setState(() => _isChangePassword = false),
+                    child: Text(
+                      'Cancel',
+                      style: TextStyle(fontSize: 20, color: Colors.blue),
+                    ),
+                  ),
+                ] else ...[
+                  ElevatedButton(
+                    onPressed: () => setState(() => _isChangePassword = true),
+                    child: Text(
+                      'Change Password',
+                      style: TextStyle(fontSize: 20),
+                    ),
+                  ),
+                ],
+                SizedBox(height: 20),
+                SwitchListTile(
+                  title: Text(
+                    'Show Captions',
+                    style: TextStyle(fontSize: 24, color: Colors.white),
+                  ),
+                  value: widget.showCaptions,
+                  onChanged: widget.onCaptionsChanged,
+                ),
+                SizedBox(height: 20),
+                ElevatedButton(
+                  onPressed: () async {
+                    final prefs = await SharedPreferences.getInstance();
+                    await prefs.clear();
+                    Navigator.pushReplacement(
+                      context,
+                      MaterialPageRoute(builder: (_) => LoginScreen()),
+                    );
+                  },
+                  child: Text('Logout', style: TextStyle(fontSize: 20)),
+                ),
+                if (_error.isNotEmpty)
+                  Padding(
+                    padding: EdgeInsets.only(top: 10),
+                    child: Text(
+                      _error,
+                      style: TextStyle(color: Colors.red, fontSize: 20),
+                    ),
+                  ),
               ],
             ),
           ),
