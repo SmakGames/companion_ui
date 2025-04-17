@@ -952,8 +952,11 @@ class SettingsScreen extends StatefulWidget {
 
 class _SettingsScreenState extends State<SettingsScreen> {
   bool _isChangePassword = false;
+  bool _isChangeSecurityAnswer = false;
   final TextEditingController _oldPasswordController = TextEditingController();
   final TextEditingController _newPasswordController = TextEditingController();
+  final TextEditingController _securityAnswerController =
+      TextEditingController();
   String _error = '';
 
   Future<void> _changePassword() async {
@@ -987,6 +990,37 @@ class _SettingsScreenState extends State<SettingsScreen> {
       }
     } catch (e) {
       print('Change password error: $e');
+      setState(() => _error = 'Network error. Try again.');
+    }
+  }
+
+  Future<void> _changeSecurityAnswer() async {
+    final url = Uri.parse('${backendUrl}auth/security_answer/');
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('access_token');
+    try {
+      final response = await http.post(
+        url,
+        headers: {
+          'Authorization': 'Bearer $token',
+          'Content-Type': 'application/json',
+        },
+        body: jsonEncode({'security_answer': _securityAnswerController.text}),
+      );
+      print(
+        'Security answer change response: ${response.statusCode} ${response.body}',
+      );
+      if (response.statusCode == 200) {
+        setState(() {
+          _error = 'Security answer updated successfully!';
+          _isChangeSecurityAnswer = false;
+          _securityAnswerController.clear();
+        });
+      } else {
+        setState(() => _error = 'Update failed: ${response.body}');
+      }
+    } catch (e) {
+      print('Change security answer error: $e');
       setState(() => _error = 'Network error. Try again.');
     }
   }
@@ -1058,11 +1092,44 @@ class _SettingsScreenState extends State<SettingsScreen> {
                       style: TextStyle(fontSize: 20, color: Colors.blue),
                     ),
                   ),
+                ] else if (_isChangeSecurityAnswer) ...[
+                  TextField(
+                    controller: _securityAnswerController,
+                    decoration: InputDecoration(
+                      labelText: 'New Security Answer (e.g., First pet’s name)',
+                    ),
+                    style: TextStyle(fontSize: 24, color: Colors.white),
+                  ),
+                  SizedBox(height: 20),
+                  ElevatedButton(
+                    onPressed: _changeSecurityAnswer,
+                    child: Text(
+                      'Update Security Answer',
+                      style: TextStyle(fontSize: 20),
+                    ),
+                  ),
+                  TextButton(
+                    onPressed:
+                        () => setState(() => _isChangeSecurityAnswer = false),
+                    child: Text(
+                      'Cancel',
+                      style: TextStyle(fontSize: 20, color: Colors.blue),
+                    ),
+                  ),
                 ] else ...[
                   ElevatedButton(
                     onPressed: () => setState(() => _isChangePassword = true),
                     child: Text(
                       'Change Password',
+                      style: TextStyle(fontSize: 20),
+                    ),
+                  ),
+                  SizedBox(height: 10),
+                  ElevatedButton(
+                    onPressed:
+                        () => setState(() => _isChangeSecurityAnswer = true),
+                    child: Text(
+                      'Change Security Answer',
                       style: TextStyle(fontSize: 20),
                     ),
                   ),
