@@ -1,15 +1,18 @@
-import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
-import 'dart:convert';
-import 'package:speech_to_text/speech_to_text.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'gaze_detector.dart';
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io'; // Added for Process.run
+import 'package:flutter_tts/flutter_tts.dart';
+import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
+import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
-import 'api_key.dart';
-import 'dart:html' as html; // New import for web audio
+import 'package:speech_to_text/speech_to_text.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-const String backendUrl = 'http://127.0.0.1:8000/api/v1/'; // Base URL for APIs
+//const String backendUrl = 'http://127.0.0.1:8000/api/v1/'; // Base URL for APIs
+const String backendUrl = 'http://10.0.2.2:8000/api/v1/';
 
 void main() {
   runApp(CompanionApp());
@@ -43,17 +46,19 @@ class LoginScreen extends StatefulWidget {
 class _LoginScreenState extends State<LoginScreen> {
   final TextEditingController _usernameController = TextEditingController();
   final TextEditingController _passwordController = TextEditingController();
-  final TextEditingController _cityController = TextEditingController(); // New
+  final TextEditingController _cityController = TextEditingController();
   final TextEditingController _preferredNameController =
-      TextEditingController(); // New
+      TextEditingController();
   final TextEditingController _securityAnswerController =
-      TextEditingController(); // New
-  final TextEditingController _newPasswordController =
-      TextEditingController(); // New
+      TextEditingController();
+  final TextEditingController _newPasswordController = TextEditingController();
   String _error = '';
   bool _isSignUp = false;
   bool _isResetPassword = false;
 
+  //
+  // _LoginScreenState _login
+  //
   Future<void> _login() async {
     final url = Uri.parse('${backendUrl}auth/token/');
     try {
@@ -76,6 +81,7 @@ class _LoginScreenState extends State<LoginScreen> {
           MaterialPageRoute(builder: (_) => ChatScreen()),
         );
       } else {
+        print('Login response: ${response.statusCode} ${response.body}');
         setState(() => _error = 'Login failed. Check credentials.');
       }
     } catch (e) {
@@ -84,7 +90,9 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
-  // new
+  //
+  // _LoginScreenState -signUp
+  //
   Future<void> _signUp() async {
     if (_preferredNameController.text.isEmpty) {
       setState(() => _error = 'Please enter your preferred name.');
@@ -124,6 +132,9 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  //
+  // _LoginScreenState _resetPassword
+  //
   Future<void> _resetPassword() async {
     final url = Uri.parse('${backendUrl}auth/password_reset/');
     try {
@@ -151,6 +162,9 @@ class _LoginScreenState extends State<LoginScreen> {
     }
   }
 
+  //
+  // _LoginScreenState build
+  //
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -159,8 +173,8 @@ class _LoginScreenState extends State<LoginScreen> {
           _isSignUp
               ? 'Sign Up'
               : _isResetPassword
-              ? 'Reset Password'
-              : 'Login',
+                  ? 'Reset Password'
+                  : 'Login',
         ),
       ),
       body: Padding(
@@ -238,8 +252,8 @@ class _LoginScreenState extends State<LoginScreen> {
                 _isSignUp
                     ? 'Create Account'
                     : _isResetPassword
-                    ? 'Reset Password'
-                    : 'Login',
+                        ? 'Reset Password'
+                        : 'Login',
                 style: TextStyle(fontSize: 20),
               ),
             ),
@@ -253,11 +267,10 @@ class _LoginScreenState extends State<LoginScreen> {
               ),
             ),
             TextButton(
-              onPressed:
-                  () => setState(() {
-                    _isResetPassword = !_isResetPassword;
-                    if (!_isResetPassword) _isSignUp = false;
-                  }),
+              onPressed: () => setState(() {
+                _isResetPassword = !_isResetPassword;
+                if (!_isResetPassword) _isSignUp = false;
+              }),
               child: Text(
                 _isResetPassword ? 'Back to Login' : 'Forgot Password?',
                 style: TextStyle(fontSize: 20, color: Colors.blue),
@@ -276,9 +289,11 @@ class _LoginScreenState extends State<LoginScreen> {
       ),
     );
   }
-}
+} // end _LoginScreenState
 
 class ChatScreen extends StatefulWidget {
+  const ChatScreen({super.key});
+
   @override
   _ChatScreenState createState() => _ChatScreenState();
 }
@@ -309,11 +324,22 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isListening = false;
   bool _isProcessing = false;
   bool _showCaptions = true;
+  bool _isGazeActive = false;
+  bool _isGazeEnabled = true;
+  bool _gazeDetectionFailed = false; // Track persistent gaze detection issues
+  bool _micError = false;
+  bool _showDebugOverlay = false; // Toggle debug rotation controls
+  bool _isSpeaking = false;
+  bool _isQuestionPending = false;
+  GazeDetector? _gazeDetector;
   Timer? _weatherTimer;
+  Timer? _speechSilenceTimer;
+  Timer? _gazeFailureTimer; // Track prolonged face detection failure
 
   @override
   void initState() {
     super.initState();
+    _gazeDetector = createGazeDetector();
     //
     // Load the access token
     //
@@ -322,8 +348,10 @@ class _ChatScreenState extends State<ChatScreen> {
       if (_accessToken != null && mounted) {
         _fetchUserProfile();
       }
+      _initGazeDetector();
       _initSpeech();
       _fetchLocationAndWeather();
+      _showTutorial();
     });
 
     //
@@ -357,8 +385,87 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _weatherTimer?.cancel();
+    _gazeFailureTimer?.cancel();
+    _speechSilenceTimer?.cancel();
     _speech.stop();
+    _controller.dispose();
+    _gazeDetector?.dispose();
     super.dispose();
+  }
+
+  Future<void> _initGazeDetector() async {
+    try {
+      var status = await Permission.camera.request();
+      if (status.isGranted) {
+        await _gazeDetector!.initialize();
+        if (_isGazeEnabled && mounted) {
+          _gazeDetector!.startGazeDetection((isGazing) {
+            setState(() {
+              _isGazeActive = isGazing;
+              if (isGazing) {
+                _gazeFailureTimer?.cancel();
+                _gazeDetectionFailed = false;
+                if (!_isListening && !_isSpeaking) {
+                  _startListening();
+                }
+              } else if (!_isSpeaking && _isListening && !_isQuestionPending) {
+                _stopListening();
+              }
+            });
+            // Start timer to detect prolonged face absence
+            if (!isGazing && !_gazeDetectionFailed) {
+              _gazeFailureTimer?.cancel();
+              _gazeFailureTimer = Timer(Duration(seconds: 10), () {
+                if (mounted) {
+                  setState(() {
+                    _gazeDetectionFailed = true;
+                    _reply =
+                        'Gaze detection unavailable. Check camera or lighting.';
+                  });
+                }
+              });
+            }
+          });
+        }
+      } else {
+        setState(() {
+          _reply = 'Camera permission denied. Please enable in settings.';
+          _gazeDetectionFailed = true;
+        });
+        print('Camera permission denied');
+      }
+    } catch (e) {
+      setState(() {
+        _reply = 'Camera error: $e';
+        _gazeDetectionFailed = true;
+      });
+      print('Gaze init error: $e');
+    }
+  }
+
+  Future<void> _showTutorial() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (!prefs.containsKey('seenTutorial')) {
+      showDialog(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('Welcome!', style: TextStyle(fontSize: 24)),
+          content: Text(
+            'Look at the screen to start talking or say "hey" to begin. Answer questions directly after I ask.',
+            style: TextStyle(fontSize: 20),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () {
+                prefs.setBool('seenTutorial', true);
+                Navigator.pop(context);
+              },
+              child: Text('OK', style: TextStyle(fontSize: 20)),
+            ),
+          ],
+        ),
+      );
+    }
   }
 
   // New: Load JWT token
@@ -393,10 +500,9 @@ class _ChatScreenState extends State<ChatScreen> {
           _preferredName = data['preferred_name']?.toString() ?? '';
           _city = data['city'] ?? 'Boston';
           _accountStatus = data['account_status']?.toString() ?? '';
-          _reply =
-              _preferredName.isNotEmpty
-                  ? 'Welcome, $_preferredName!'
-                  : 'Welcome!';
+          _reply = _preferredName.isNotEmpty
+              ? 'Welcome, $_preferredName!'
+              : 'Welcome!';
         });
         _speakReply("Welcome $_preferredName! I am happy to see you.");
       } else if (response.statusCode == 401) {
@@ -432,7 +538,9 @@ class _ChatScreenState extends State<ChatScreen> {
         final data = jsonDecode(response.body);
         await prefs.setString('access_token', data['access']);
         setState(() => _accessToken = data['access']);
+        print('New access token: $_accessToken');
       } else {
+        print('Refresh failed, redirecting to login');
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(builder: (_) => LoginScreen()),
@@ -452,34 +560,46 @@ class _ChatScreenState extends State<ChatScreen> {
   // Console logs: “listening” → “done” → 2s pause → “listening” cycle.
   //
   Future<void> _initSpeech() async {
-    //
-    // Prepares the mic — returns true if ready
-    //
+    var micStatus = await Permission.microphone.request();
+    if (!micStatus.isGranted) {
+      setState(() {
+        _reply = 'Microphone permission denied. Please enable in settings.';
+        _micError = true;
+      });
+      await openAppSettings();
+      return;
+    }
     bool available = await _speech.initialize(
-      // Callback for mic state changes (e.g., “listening,” “done,” “notListening”).
-      // If mic stops (done = phrase ended, notListening = fully off) AND
-      // you want it on (_isListening) AND widget’s alive (mounted), wait 2000ms (2s),
-      // then restart via _startListening.
       onStatus: (status) {
         print('Speech status: $status');
+        // Only restart if gaze active or question pending
         if ((status == 'done' || status == 'notListening') &&
             _isListening &&
-            mounted) {
-          // Delay to ensure previous session ends - set to 100 initially
+            mounted &&
+            (_isGazeActive || _isQuestionPending)) {
           Future.delayed(Duration(milliseconds: 200), () {
             if (_isListening && mounted) _startListening();
           });
         }
       },
-      // Logs issues (e.g., mic denied)—helps you debug.
-      onError: (error) => print('Speech error: $error'),
+      onError: (error) {
+        print('Speech error details: $error');
+        if (error.errorMsg.contains('timeout')) {
+          if (_isListening && mounted) _startListening();
+        } else if (error.errorMsg.contains('client') && error.permanent) {
+          setState(() {
+            _reply = 'Microphone error. Check emulator audio settings.';
+            _micError = true;
+            _isListening = false;
+          });
+        }
+      },
     );
-    // if (available): If init succeeds, start listening immediately.
-    if (available) {
-      _startListening();
-    } else {
-      // Else: Show a “can’t hear” message—user knows mic’s down.
-      setState(() => _reply = 'Sorry, I can’t hear you yet!');
+    if (!available) {
+      setState(() {
+        _reply = 'Speech initialization failed. Check microphone permissions.';
+        _micError = true;
+      });
     }
   }
 
@@ -489,70 +609,58 @@ class _ChatScreenState extends State<ChatScreen> {
   //  - Mic’s on → hears “hey [message]” → processes → speaks → restarts after 100ms.
   //  - Console: “listening” → phrase → “done” (after 4s silence) → quick restart.
   //
-  void _startListening() async {
-    // if (!_isListening && ...): If mic’s off, init it AND
-    // flag _isListening—UI updates (e.g., mic icon).
-    if (!_isListening && await _speech.initialize()) {
+  void _startListening({bool requireTrigger = true}) async {
+    if (!_isListening && await _speech.initialize() && !_micError) {
       setState(() => _isListening = true);
     }
-    // _speech.stop(): Stops any active session - prevents overlap errors on web.
     await _speech.stop();
-    // Future.delayed(10ms): Tiny buffer—lets web’s SpeechRecognition reset
-    await Future.delayed(Duration(milliseconds: 10)); // Small buffer of 50
-    if (_isListening && mounted) {
-      // speech.listen(): Starts mic with:
-      // - listenFor: 10 minutes: Max duration—web might cap lower (e.g., Chrome ~10m) —
-      //   keeps mic alive long-term.
-      // - pauseFor: <n> seconds: After <n>s silence, finalizes phrase—triggers onResult.
-      // - cancelOnError: false: Keeps going despite glitches—robust for elderly users.
-      // - partialResults: false: Waits for full phrase—cleaner input.
-      // - onResult:
-      // - - Stores Words: words = full phrase (e.g., “hey how’s it going”).
-      // - - Trigger Check: If starts with “hey” and not busy (_isProcessing), act:
-      // - - - Strip Trigger: message = “how’s it going”.
-      // - - - Send: Call _sendMessage—talks to OpenAI/Google TTS.
-      // - - - Post-Reply: After _sendMessage finishes (.then),
-      // - - - - reset _isProcessing,
-      // - - - - wait 100ms,
-      // - - - - restart listening.
-      // - - Empty Case: If just “hey” (no message), reset _isProcessing — no action.
+    await Future.delayed(Duration(milliseconds: 10));
+    if (_isListening &&
+        mounted &&
+        (_isGazeActive || _isQuestionPending || !requireTrigger)) {
       _speech.listen(
-        listenFor: Duration(minutes: 10), // 10 "minutes: 10"
-        pauseFor: Duration(seconds: 2),
+        listenFor: Duration(seconds: 30),
+        pauseFor: Duration(seconds: 5),
         cancelOnError: false,
-        partialResults: false,
+        partialResults: true,
         onResult: (result) {
           String words = result.recognizedWords.toLowerCase();
           setState(() => _lastWords = words);
-          //
-          // Listen for the trigger word. If the trigger word is spoken
-          // at the beginning of the utterance, the talk_api gets called.
-          //
-          if (words.startsWith(_triggerWord) && !_isProcessing) {
-            setState(() => _isProcessing = true);
-            //
-            // Removes the trigger word.
-            //
-            String message = words.replaceFirst(_triggerWord, '').trim();
-            if (message.isNotEmpty) {
-              _sendMessage(message).then((_) {
-                if (mounted) {
-                  setState(() => _isProcessing = false);
-                  //
-                  // initial delay set to 100
-                  // Too long? If mic’s off too much, play with the number to test responsiveness.
-                  //
-                  Future.delayed(Duration(milliseconds: 100), () {
-                    if (_isListening && mounted) _startListening();
+          if (words.isNotEmpty) {
+            setState(() => _isSpeaking = true);
+            _speechSilenceTimer?.cancel();
+            _speechSilenceTimer = Timer(Duration(seconds: 2), () {
+              if (_isListening && mounted) {
+                setState(() => _isSpeaking = false);
+                String message = _isQuestionPending && !requireTrigger
+                    ? words
+                    : words.startsWith(_triggerWord)
+                        ? words.replaceFirst(_triggerWord, '').trim()
+                        : '';
+                if (message.isNotEmpty) {
+                  setState(() => _isProcessing = true);
+                  _sendMessage(message).then((_) {
+                    if (mounted) {
+                      setState(() {
+                        _isProcessing = false;
+                        _isQuestionPending = false;
+                      });
+                      if (_isGazeActive && !_isListening) {
+                        _startListening(requireTrigger: !_isQuestionPending);
+                      }
+                    }
                   });
                 }
-              });
-            } else {
-              if (mounted) setState(() => _isProcessing = false);
-            }
-          } // end of trigger word condition
+                if (!_isGazeActive && !_isQuestionPending) {
+                  _stopListening();
+                }
+              }
+            });
+          }
         },
       );
+    } else {
+      _stopListening();
     }
   }
 
@@ -563,7 +671,11 @@ class _ChatScreenState extends State<ChatScreen> {
   // Expected Behavior
   //   Mic off, no restarts—UI shows “mic off” icon.
   void _stopListening() {
-    setState(() => _isListening = false);
+    setState(() {
+      _isListening = false;
+      _isSpeaking = false;
+    });
+    _speechSilenceTimer?.cancel();
     _speech.stop();
   }
 
@@ -571,12 +683,6 @@ class _ChatScreenState extends State<ChatScreen> {
   // Get the user location and weather data
   //
   Future<void> _fetchLocationAndWeather() async {
-    // Web fallback: Use user_profile city if geolocator fails
-    //bool isWeb = identical(0, 0.0); // Simple web check
-    //if (isWeb) {
-    //  await _fetchWeather();
-    //  return;
-    //}
     try {
       bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
@@ -655,16 +761,24 @@ class _ChatScreenState extends State<ChatScreen> {
         },
         body: jsonEncode({
           'message': message,
-          'city': _city, // Use user_profile city
+          'city': _city,
         }),
       );
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
-        setState(() => _reply = data['reply'] ?? 'No response');
+        setState(() {
+          _reply = data['reply'] ?? 'No response';
+          // Use-case 3: Detect if response is a question
+          _isQuestionPending = _reply.trim().endsWith('?');
+        });
         await _speakReply(data['reply']);
+        if (_isQuestionPending && mounted) {
+          // Start listening for answer without trigger
+          _startListening(requireTrigger: false);
+        }
       } else if (response.statusCode == 401) {
         await _refreshToken();
-        await _sendMessage(message); // Retry
+        await _sendMessage(message);
       } else {
         setState(() => _reply = 'Error: ${response.body}');
       }
@@ -674,44 +788,15 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _speakReply(String text) async {
-    const googleTtsUrl =
-        'https://texttospeech.googleapis.com/v1/text:synthesize';
+    final tts = FlutterTts();
     try {
-      final ttsResponse = await http.post(
-        Uri.parse(googleTtsUrl),
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Goog-Api-Key': googleApiKey,
-        },
-        body: jsonEncode({
-          'input': {'text': text},
-          'voice': {'languageCode': 'en-US', 'name': 'en-US-News-L'},
-          'audioConfig': {
-            'audioEncoding': 'MP3',
-            'speakingRate': 1.0,
-            'pitch': 0.0,
-          },
-        }),
-      );
-      if (ttsResponse.statusCode == 200) {
-        final ttsData = jsonDecode(ttsResponse.body);
-        final audioContent = ttsData['audioContent'];
-        final blob = html.Blob([base64Decode(audioContent)]);
-        final url = html.Url.createObjectUrlFromBlob(blob);
-        final audio =
-            html.AudioElement()
-              ..src = url
-              ..autoplay = true;
-        html.document.body?.append(audio);
-        audio.onEnded.listen((_) {
-          audio.remove();
-          html.Url.revokeObjectUrl(url);
-        });
-      } else {
-        setState(() => _reply = 'Sorry, I can’t speak right now!');
-      }
+      await tts.setLanguage('en-US');
+      await tts.setSpeechRate(0.4);
+      await tts.setPitch(.7);
+      await tts.speak(text);
     } catch (e) {
       setState(() => _reply = 'Speech error. Try again.');
+      print('TTS error: $e');
     }
   }
 
@@ -722,8 +807,16 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     final time = DateTime.now();
     final isDay = time.hour >= 6 && time.hour < 18;
-    final weatherBg =
-        _temp != 'unknown' && int.parse(_temp) < 50 ? 'cloudy' : 'sunny';
+    String weatherBg = 'sunny'; // Default
+    try {
+      final tempValue = int.tryParse(_temp);
+      if (_temp != 'unknown' && tempValue != null) {
+        weatherBg = tempValue < 50 ? 'cloudy' : 'sunny';
+      }
+    } catch (e) {
+      print('Error parsing _temp: $e');
+      weatherBg = 'sunny'; // Fallback
+    }
 
     return Scaffold(
       body: Stack(
@@ -748,20 +841,19 @@ class _ChatScreenState extends State<ChatScreen> {
             right: 20,
             child: Column(
               children: [
-                //
-                // Toggle captions
-                //
                 if (_showCaptions)
-                  //
-                  // The text response from the API is shown here
-                  //
                   Text(
                     _reply.isNotEmpty
                         ? _reply
                         : 'Hello, ${_preferredName.isNotEmpty ? _preferredName : "friend"}!',
                     style: TextStyle(
                       fontSize: 24,
-                      color: Colors.white,
+                      color: _reply.startsWith('Error') ||
+                              _reply.contains('error') ||
+                              _gazeDetectionFailed ||
+                              _micError
+                          ? Colors.red
+                          : Colors.white,
                       shadows: [
                         Shadow(
                           color: Colors.black,
@@ -772,17 +864,34 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                     textAlign: TextAlign.center,
                   ),
-                //
-                // Temporary - the words that the user spoke
-                //
-                if (_showCaptions)
+                if (_showCaptions && _lastWords.isNotEmpty)
                   Text(
                     'Heard: $_lastWords',
                     style: TextStyle(fontSize: 16, color: Colors.blue),
                   ),
-                //
-                // The text that displays the weather and city
-                //
+                if (_showCaptions && !_gazeDetectionFailed)
+                  Text(
+                    _isGazeActive ? 'Gaze active' : 'Gaze inactive',
+                    style: TextStyle(
+                      fontSize: 24,
+                      color: _isGazeActive ? Colors.green : Colors.yellow,
+                    ),
+                  ),
+                if (_showCaptions && _isListening)
+                  Text(
+                    'Listening',
+                    style: TextStyle(fontSize: 24, color: Colors.blue),
+                  ),
+                if (_gazeDetectionFailed)
+                  Text(
+                    'Gaze detection unavailable. Check camera, lighting, or distance.',
+                    style: TextStyle(fontSize: 24, color: Colors.red),
+                  ),
+                if (_micError)
+                  Text(
+                    'Microphone unavailable. Check permissions or emulator audio.',
+                    style: TextStyle(fontSize: 24, color: Colors.red),
+                  ),
                 Text(
                   _temp != 'unknown' ? 'It’s $_temp°F in $_city' : '',
                   style: TextStyle(
@@ -801,55 +910,120 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
           Positioned(
+            top: 20,
+            right: 20,
+            child: IconButton(
+              icon: Icon(Icons.bug_report, color: Colors.white),
+              onPressed: () {
+                setState(() => _showDebugOverlay = !_showDebugOverlay);
+              },
+            ),
+          ),
+          if (_showDebugOverlay)
+            Positioned(
+              top: 60,
+              right: 20,
+              child: Container(
+                color: Colors.black54,
+                padding: EdgeInsets.all(8),
+                child: Column(
+                  children: [
+                    Text('Debug: Gaze & Mic',
+                        style: TextStyle(color: Colors.white)),
+                    ElevatedButton(
+                      onPressed: () {
+                        _gazeDetector?.stopGazeDetection();
+                        _gazeDetector?.dispose();
+                        _gazeDetector = createGazeDetector();
+                        _initGazeDetector();
+                      },
+                      child: Text('Retry Gaze Detection'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () {
+                        Process.run('adb', [
+                          'shell',
+                          'am',
+                          'start',
+                          '-a',
+                          'android.media.action.IMAGE_CAPTURE'
+                        ]).then((result) {
+                          if (result.exitCode != 0) {
+                            print('Failed to launch camera: ${result.stderr}');
+                          }
+                        });
+                      },
+                      child: Text('Test Webcam'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          Positioned(
             bottom: 50,
             right: 20,
             child: Column(
               children: [
-                //
-                // The microphone toggle button
-                //
                 FloatingActionButton(
-                  onPressed: _isListening ? _stopListening : _startListening,
+                  onPressed: _isListening
+                      ? _stopListening
+                      : () => _startListening(requireTrigger: true),
                   child: Icon(_isListening ? Icons.mic_off : Icons.mic),
                 ),
                 SizedBox(height: 10),
-                //
-                // The button to navigate to the settings screen
-                //
                 FloatingActionButton(
-                  onPressed:
-                      () => Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder:
-                              (_) => SettingsScreen(
-                                preferredName: _preferredName,
-                                city: _city,
-                                accountStatus: _accountStatus,
-                                showCaptions: _showCaptions,
-                                onCaptionsChanged: (value) {
-                                  setState(() => _showCaptions = value);
-                                },
-                              ),
-                        ),
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => SettingsScreen(
+                        preferredName: _preferredName,
+                        city: _city,
+                        accountStatus: _accountStatus,
+                        showCaptions: _showCaptions,
+                        isGazeEnabled: _isGazeEnabled,
+                        onCaptionsChanged: (value) {
+                          setState(() => _showCaptions = value);
+                        },
+                        onGazeEnabledChanged: (value) {
+                          setState(() {
+                            _isGazeEnabled = value;
+                            if (value) {
+                              _gazeDetector!.startGazeDetection((isGazing) {
+                                setState(() {
+                                  _isGazeActive = isGazing;
+                                  if (isGazing &&
+                                      !_isListening &&
+                                      !_isSpeaking) {
+                                    _startListening(requireTrigger: true);
+                                  } else if (!isGazing &&
+                                      !_isSpeaking &&
+                                      _isListening &&
+                                      !_isQuestionPending) {
+                                    _stopListening();
+                                  }
+                                });
+                              });
+                            } else {
+                              _gazeDetector!.stopGazeDetection();
+                              setState(() => _isGazeActive = false);
+                              _stopListening();
+                            }
+                          });
+                        },
                       ),
+                    ),
+                  ),
                   child: Icon(Icons.settings),
                 ),
                 SizedBox(height: 10),
-                //
-                // The input textbox view/hide toggle button
-                //
                 FloatingActionButton(
                   onPressed: () => setState(() => _showInput = !_showInput),
                   child: Icon(_showInput ? Icons.close : Icons.chat),
                 ),
                 SizedBox(height: 10),
-                //
-                // The closed captions toggle button
-                //
                 FloatingActionButton(
-                  onPressed:
-                      () => setState(() => _showCaptions = !_showCaptions),
+                  onPressed: () =>
+                      setState(() => _showCaptions = !_showCaptions),
                   child: Icon(
                     _showCaptions
                         ? Icons.closed_caption_off
@@ -860,18 +1034,12 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
           if (_showInput)
-            //
-            // The input box and the "send" button
-            //
             Positioned(
               bottom: 120,
               left: 20,
               right: 80,
               child: Row(
                 children: [
-                  //
-                  // The "Expanded" widget containing two children
-                  //
                   Expanded(
                     child: TextField(
                       controller: _controller,
@@ -886,9 +1054,6 @@ class _ChatScreenState extends State<ChatScreen> {
                     ),
                   ),
                   SizedBox(width: 10),
-                  //
-                  // The "send" button
-                  //
                   ElevatedButton(
                     onPressed: () {
                       if (_controller.text.isNotEmpty) {
@@ -936,14 +1101,18 @@ class SettingsScreen extends StatefulWidget {
   final String city;
   final String accountStatus;
   final bool showCaptions;
+  final bool isGazeEnabled;
   final ValueChanged<bool> onCaptionsChanged;
+  final ValueChanged<bool> onGazeEnabledChanged;
 
   SettingsScreen({
     required this.preferredName,
     required this.city,
     required this.accountStatus,
     required this.showCaptions,
+    required this.isGazeEnabled,
     required this.onCaptionsChanged,
+    required this.onGazeEnabledChanged,
   });
 
   @override
@@ -1109,8 +1278,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                     ),
                   ),
                   TextButton(
-                    onPressed:
-                        () => setState(() => _isChangeSecurityAnswer = false),
+                    onPressed: () =>
+                        setState(() => _isChangeSecurityAnswer = false),
                     child: Text(
                       'Cancel',
                       style: TextStyle(fontSize: 20, color: Colors.blue),
@@ -1126,8 +1295,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   SizedBox(height: 10),
                   ElevatedButton(
-                    onPressed:
-                        () => setState(() => _isChangeSecurityAnswer = true),
+                    onPressed: () =>
+                        setState(() => _isChangeSecurityAnswer = true),
                     child: Text(
                       'Change Security Answer',
                       style: TextStyle(fontSize: 20),
@@ -1142,6 +1311,15 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   ),
                   value: widget.showCaptions,
                   onChanged: widget.onCaptionsChanged,
+                ),
+                SizedBox(height: 10),
+                SwitchListTile(
+                  title: Text(
+                    'Enable Gaze Detection',
+                    style: TextStyle(fontSize: 24, color: Colors.white),
+                  ),
+                  value: widget.isGazeEnabled,
+                  onChanged: widget.onGazeEnabledChanged,
                 ),
                 SizedBox(height: 20),
                 ElevatedButton(

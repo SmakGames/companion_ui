@@ -1,0 +1,201 @@
+import 'dart:typed_data';
+import 'dart:ui';
+import 'package:camera/camera.dart';
+import 'package:google_mlkit_face_detection/google_mlkit_face_detection.dart';
+
+typedef GazeCallback = void Function(bool isGazing);
+
+abstract class GazeDetector {
+  Future<void> initialize();
+  void startGazeDetection(GazeCallback onGazeStateChanged);
+  void stopGazeDetection();
+  void dispose();
+  bool get isInitialized;
+}
+
+class GazeDetectorImpl implements GazeDetector {
+  CameraController? _cameraController;
+  FaceDetector? _faceDetector;
+  bool _isProcessing = false;
+  bool _isGazeActive = false;
+  int _frameCount = 0;
+  int _gazeOnCount = 0;
+  int _gazeOffCount = 0;
+  static const int _frameSkip = 10;
+  static const int _debounceFrames = 15;
+  static const int _faceLossTimeoutFrames = 50;
+  static const InputImageRotation _imageRotation =
+      InputImageRotation.rotation0deg; // Try 90deg, 180deg, 270deg
+
+  GazeDetectorImpl() {
+    _faceDetector = FaceDetector(
+      options: FaceDetectorOptions(
+        enableClassification: true,
+        enableLandmarks: true,
+        enableTracking: true,
+        performanceMode: FaceDetectorMode.accurate,
+        minFaceSize: 0.05, // Maximum tolerance
+      ),
+    );
+  }
+
+  @override
+  Future<void> initialize() async {
+    try {
+      final cameras = await availableCameras();
+      if (cameras.isEmpty) {
+        print('No cameras available');
+        throw Exception('No cameras found. Check emulator webcam settings.');
+      }
+      final frontCamera = cameras.firstWhere(
+        (camera) => camera.lensDirection == CameraLensDirection.front,
+        orElse: () => cameras.first,
+      );
+      print(
+          'Selected camera: ${frontCamera.name}, Lens: ${frontCamera.lensDirection}, '
+          'Sensor: ${frontCamera.sensorOrientation}');
+      _cameraController = CameraController(
+        frontCamera,
+        ResolutionPreset.low,
+        enableAudio: false,
+      );
+      await _cameraController!.initialize();
+      print('Camera initialized: ${_cameraController!.value.isInitialized}, '
+          'Resolution: ${_cameraController!.value.previewSize}, '
+          'Preview: ${_cameraController!.value.previewSize}');
+    } catch (e) {
+      print('Camera init error: $e');
+      throw Exception('Camera error: $e. Check permissions and webcam.');
+    }
+  }
+
+  @override
+  void startGazeDetection(GazeCallback onGazeStateChanged) {
+    if (_cameraController == null || !_cameraController!.value.isInitialized) {
+      print('Camera not initialized');
+      return;
+    }
+    _frameCount = 0;
+    _gazeOnCount = 0;
+    _gazeOffCount = 0;
+    _cameraController!.startImageStream((image) async {
+      _frameCount++;
+      if (_frameCount % _frameSkip != 0 || _isProcessing) return;
+      _isProcessing = true;
+      try {
+        final inputImage = _convertCameraImage(image);
+        final faces = await _faceDetector!.processImage(inputImage);
+        print('Frame: $_frameCount, Faces detected: ${faces.length}');
+        bool newGazeState = false;
+        if (faces.isNotEmpty) {
+          final face = faces.first;
+          final leftEye = face.leftEyeOpenProbability;
+          final rightEye = face.rightEyeOpenProbability;
+          print('LeftEye: $leftEye, RightEye: $rightEye');
+          newGazeState = leftEye != null &&
+              rightEye != null &&
+              leftEye > 0.3 &&
+              rightEye > 0.3;
+        } else {
+          print(
+              'No faces detected. Possible causes: lighting, distance, rotation, or webcam issue.');
+        }
+        if (newGazeState) {
+          _gazeOnCount++;
+          _gazeOffCount = 0;
+        } else {
+          _gazeOffCount++;
+          _gazeOnCount = 0;
+        }
+        if (_gazeOnCount >= _debounceFrames && !_isGazeActive) {
+          _isGazeActive = true;
+          onGazeStateChanged(true);
+          print('Gaze active');
+        } else if (_gazeOffCount >= _faceLossTimeoutFrames && _isGazeActive) {
+          _isGazeActive = false;
+          onGazeStateChanged(false);
+          print('Gaze inactive due to prolonged face absence');
+        }
+      } catch (e) {
+        print('Face detection error: $e');
+      } finally {
+        _isProcessing = false;
+      }
+    });
+    print('Gaze detection started');
+  }
+
+  @override
+  void stopGazeDetection() {
+    _cameraController?.stopImageStream();
+    _isGazeActive = false;
+    _isProcessing = false;
+    _frameCount = 0;
+    _gazeOnCount = 0;
+    _gazeOffCount = 0;
+    print('Gaze detection stopped');
+  }
+
+  @override
+  void dispose() {
+    _cameraController?.dispose();
+    _faceDetector?.close();
+    print('Gaze detector disposed');
+  }
+
+  @override
+  bool get isInitialized => _cameraController?.value.isInitialized ?? false;
+
+  InputImage _convertCameraImage(CameraImage image) {
+    try {
+      final width = image.width;
+      final height = image.height;
+      final format = image.format.group;
+      print('Image: ${width}x${height}, Format: $format, '
+          'BytesPerRow: ${image.planes[0].bytesPerRow}');
+
+      if (format != ImageFormatGroup.yuv420) {
+        throw Exception('Unsupported image format: $format');
+      }
+
+      final yPlane = image.planes[0];
+      final uPlane = image.planes[1];
+      final vPlane = image.planes[2];
+      final yBytes = yPlane.bytes;
+      final uBytes = uPlane.bytes;
+      final vBytes = vPlane.bytes;
+
+      final totalSize = yBytes.length + uBytes.length + vBytes.length;
+      final bytes = Uint8List(totalSize);
+      int offset = 0;
+
+      bytes.setRange(offset, offset + yBytes.length, yBytes);
+      offset += yBytes.length;
+
+      for (int i = 0; i < uBytes.length; i++) {
+        bytes[offset++] = vBytes[i];
+        bytes[offset++] = uBytes[i];
+      }
+
+      print(
+          'ByteBuffer size: ${bytes.length}, Expected: ${width * height * 3 ~/ 2}');
+
+      return InputImage.fromBytes(
+        bytes: bytes,
+        metadata: InputImageMetadata(
+          size: Size(width.toDouble(), height.toDouble()),
+          rotation: _imageRotation,
+          format: InputImageFormat.nv21,
+          bytesPerRow: yPlane.bytesPerRow,
+        ),
+      );
+    } catch (e) {
+      print('Image conversion error: $e');
+      rethrow;
+    }
+  }
+}
+
+GazeDetector createGazeDetector() {
+  return GazeDetectorImpl();
+}
