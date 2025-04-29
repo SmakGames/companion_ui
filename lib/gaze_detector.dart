@@ -25,7 +25,7 @@ class GazeDetectorImpl implements GazeDetector {
   static const int _debounceFrames = 15;
   static const int _faceLossTimeoutFrames = 50;
   static const InputImageRotation _imageRotation =
-      InputImageRotation.rotation0deg; // Try 90deg, 180deg, 270deg
+      InputImageRotation.rotation0deg;
 
   GazeDetectorImpl() {
     _faceDetector = FaceDetector(
@@ -34,7 +34,7 @@ class GazeDetectorImpl implements GazeDetector {
         enableLandmarks: true,
         enableTracking: true,
         performanceMode: FaceDetectorMode.accurate,
-        minFaceSize: 0.05, // Maximum tolerance
+        minFaceSize: 0.05,
       ),
     );
   }
@@ -61,8 +61,7 @@ class GazeDetectorImpl implements GazeDetector {
       );
       await _cameraController!.initialize();
       print('Camera initialized: ${_cameraController!.value.isInitialized}, '
-          'Resolution: ${_cameraController!.value.previewSize}, '
-          'Preview: ${_cameraController!.value.previewSize}');
+          'Resolution: ${_cameraController!.value.previewSize}');
     } catch (e) {
       print('Camera init error: $e');
       throw Exception('Camera error: $e. Check permissions and webcam.');
@@ -94,8 +93,8 @@ class GazeDetectorImpl implements GazeDetector {
           print('LeftEye: $leftEye, RightEye: $rightEye');
           newGazeState = leftEye != null &&
               rightEye != null &&
-              leftEye > 0.3 &&
-              rightEye > 0.3;
+              leftEye > 0.15 &&
+              rightEye > 0.15;
         } else {
           print(
               'No faces detected. Possible causes: lighting, distance, rotation, or webcam issue.');
@@ -153,33 +152,27 @@ class GazeDetectorImpl implements GazeDetector {
       final format = image.format.group;
       print('Image: ${width}x${height}, Format: $format, '
           'BytesPerRow: ${image.planes[0].bytesPerRow}');
-
       if (format != ImageFormatGroup.yuv420) {
+        print('Unsupported image format: $format');
         throw Exception('Unsupported image format: $format');
       }
-
       final yPlane = image.planes[0];
       final uPlane = image.planes[1];
       final vPlane = image.planes[2];
       final yBytes = yPlane.bytes;
       final uBytes = uPlane.bytes;
       final vBytes = vPlane.bytes;
-
       final totalSize = yBytes.length + uBytes.length + vBytes.length;
       final bytes = Uint8List(totalSize);
       int offset = 0;
-
       bytes.setRange(offset, offset + yBytes.length, yBytes);
       offset += yBytes.length;
-
       for (int i = 0; i < uBytes.length; i++) {
         bytes[offset++] = vBytes[i];
         bytes[offset++] = uBytes[i];
       }
-
       print(
           'ByteBuffer size: ${bytes.length}, Expected: ${width * height * 3 ~/ 2}');
-
       return InputImage.fromBytes(
         bytes: bytes,
         metadata: InputImageMetadata(

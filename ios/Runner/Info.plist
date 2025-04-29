@@ -29,6 +29,12 @@
 	<key>UIMainStoryboardFile</key>
 	<string>Main</string>
 	<key>UISupportedInterfaceOrientations</key>
+	<key>NSCameraUsageDescription</key>
+	<string>Camera access for gaze detection to interact with the companion</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Microphone access for voice commands</string>
+	<key>NSLocationWhenInUseUsageDescription</key>
+	<string>Location access for weather updates</string>
 	<array>
 		<string>UIInterfaceOrientationPortrait</string>
 		<string>UIInterfaceOrientationLandscapeLeft</string>

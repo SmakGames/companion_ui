@@ -1,15 +1,18 @@
-import 'package:permission_handler/permission_handler.dart';
-import 'gaze_detector.dart';
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io'; // Added for Process.run
-import 'package:flutter_tts/flutter_tts.dart';
+import 'dart:io';
+//import 'package:camera/camera.dart';
 import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
-import 'package:speech_to_text/speech_to_text.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:process/process.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:speech_to_text/speech_to_text.dart';
+import 'package:flutter_tts/flutter_tts.dart';
+import 'gaze_detector.dart';
+//import 'package:companion_ui/utils/logger.dart';
 
 //const String backendUrl = 'http://127.0.0.1:8000/api/v1/'; // Base URL for APIs
 const String backendUrl = 'http://10.0.2.2:8000/api/v1/';
@@ -76,12 +79,20 @@ class _LoginScreenState extends State<LoginScreen> {
         final prefs = await SharedPreferences.getInstance();
         await prefs.setString('access_token', data['access']);
         await prefs.setString('refresh_token', data['refresh']);
+        await prefs.setString('username', _usernameController.text);
+        print(
+            'Saved to SharedPreferences: access_token=${data['access'].substring(0, 10)}..., username=${_usernameController.text}');
+        // Verify save
+        final savedUsername = prefs.getString('username');
+        final savedToken = prefs.getString('access_token');
+        print(
+            'Verified SharedPreferences: username=$savedUsername, token=${savedToken != null ? "valid" : "null"}');
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(builder: (_) => ChatScreen()),
         );
       } else {
-        print('Login response: ${response.statusCode} ${response.body}');
+        print('Login failed: ${response.statusCode} ${response.body}');
         setState(() => _error = 'Login failed. Check credentials.');
       }
     } catch (e) {
@@ -199,9 +210,8 @@ class _LoginScreenState extends State<LoginScreen> {
               SizedBox(height: 10),
               TextField(
                 controller: _preferredNameController,
-                decoration: InputDecoration(
-                  labelText: 'Preferred Name (required)',
-                ),
+                decoration:
+                    InputDecoration(labelText: 'Preferred Name (required)'),
                 style: TextStyle(fontSize: 24),
               ),
               SizedBox(height: 10),
@@ -317,6 +327,7 @@ class _ChatScreenState extends State<ChatScreen> {
   String _units = 'imperial';
   String _formattedDateTime = '';
   String _lastWords = '';
+  String _username = '';
   String? _accessToken; // JWT token
   double? _lat;
   double? _lon;
@@ -335,49 +346,35 @@ class _ChatScreenState extends State<ChatScreen> {
   Timer? _weatherTimer;
   Timer? _speechSilenceTimer;
   Timer? _gazeFailureTimer; // Track prolonged face detection failure
+  final FlutterTts _tts = FlutterTts();
 
   @override
   void initState() {
     super.initState();
-    _gazeDetector = createGazeDetector();
-    //
-    // Load the access token
-    //
-    //_loadToken();
+    print('ChatScreen initialized');
     _loadToken().then((_) {
-      if (_accessToken != null && mounted) {
+      _gazeDetector = createGazeDetector();
+      if (_accessToken != null && _username.isNotEmpty && mounted) {
         _fetchUserProfile();
+        _loadPreferences();
       }
+      _initTts();
       _initGazeDetector();
       _initSpeech();
       _fetchLocationAndWeather();
       _showTutorial();
     });
-
-    //
-    // Set up a 15 minute timer to check the weather
-    //
     _weatherTimer = Timer.periodic(
       Duration(minutes: 15),
       (_) => _fetchWeather(),
     );
-
-    //
-    // Create a formatteed date object
-    //
-    _formattedDateTime = DateFormat(
-      'EEEE, MMMM d, y – hh:mm a',
-    ).format(DateTime.now());
-
-    //
-    // Create a timer to update the time every minute
-    //
+    _formattedDateTime =
+        DateFormat('EEEE, MMMM d, y – hh:mm a').format(DateTime.now());
     Timer.periodic(Duration(minutes: 1), (timer) {
       if (!mounted) return;
       setState(() {
-        _formattedDateTime = DateFormat(
-          'EEEE, MMMM d, y – hh:mm a',
-        ).format(DateTime.now());
+        _formattedDateTime =
+            DateFormat('EEEE, MMMM d, y – hh:mm a').format(DateTime.now());
       });
     });
   }
@@ -388,9 +385,37 @@ class _ChatScreenState extends State<ChatScreen> {
     _gazeFailureTimer?.cancel();
     _speechSilenceTimer?.cancel();
     _speech.stop();
+    _tts.stop();
     _controller.dispose();
     _gazeDetector?.dispose();
     super.dispose();
+  }
+
+  Future<void> _initTts() async {
+    try {
+      await _tts.setLanguage('en-US');
+      await _tts.setSpeechRate(0.4);
+      await _tts.setPitch(0.7);
+      print('TTS initialized: language=en-US, rate=0.5, pitch=1.0');
+    } catch (e) {
+      print('TTS init error: $e');
+      setState(() => _reply = 'TTS initialization failed: $e');
+    }
+    _tts.setCompletionHandler(() {
+      setState(() => _isSpeaking = false);
+      print('TTS speaking completed');
+      if (_isGazeActive && !_isListening && mounted) {
+        print('Restarting listening after TTS completion');
+        _startListening();
+      }
+    });
+    _tts.setErrorHandler((msg) {
+      setState(() {
+        _isSpeaking = false;
+        _reply = 'TTS error: $msg';
+      });
+      print('TTS error: $msg');
+    });
   }
 
   Future<void> _initGazeDetector() async {
@@ -398,6 +423,7 @@ class _ChatScreenState extends State<ChatScreen> {
       var status = await Permission.camera.request();
       if (status.isGranted) {
         await _gazeDetector!.initialize();
+        print('Gaze detector initialized');
         if (_isGazeEnabled && mounted) {
           _gazeDetector!.startGazeDetection((isGazing) {
             setState(() {
@@ -406,13 +432,15 @@ class _ChatScreenState extends State<ChatScreen> {
                 _gazeFailureTimer?.cancel();
                 _gazeDetectionFailed = false;
                 if (!_isListening && !_isSpeaking) {
+                  print('Gaze active, starting listening');
                   _startListening();
                 }
               } else if (!_isSpeaking && _isListening && !_isQuestionPending) {
+                print('Gaze inactive, stopping listening');
                 _stopListening();
               }
             });
-            // Start timer to detect prolonged face absence
+            print('Gaze state: $isGazing');
             if (!isGazing && !_gazeDetectionFailed) {
               _gazeFailureTimer?.cancel();
               _gazeFailureTimer = Timer(Duration(seconds: 10), () {
@@ -422,6 +450,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     _reply =
                         'Gaze detection unavailable. Check camera or lighting.';
                   });
+                  print('Gaze detection failed');
                 }
               });
             }
@@ -471,14 +500,24 @@ class _ChatScreenState extends State<ChatScreen> {
   // New: Load JWT token
   Future<void> _loadToken() async {
     final prefs = await SharedPreferences.getInstance();
+    final accessToken = prefs.getString('access_token');
+    final username = prefs.getString('username') ?? '';
     setState(() {
-      _accessToken = prefs.getString('access_token');
+      _accessToken = accessToken;
+      _username = username;
     });
-    if (_accessToken == null) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => LoginScreen()),
-      );
+    print(
+        'Loaded token: ${_accessToken != null ? "valid" : "null"}, username: $_username');
+    if (_accessToken == null || _username.isEmpty) {
+      setState(() => _reply = 'Session expired or no username. Please log in.');
+      print('Session invalid, delaying redirect to LoginScreen');
+      await Future.delayed(Duration(seconds: 2)); // Allow UI to show error
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => LoginScreen()),
+        );
+      }
     }
   }
 
@@ -494,6 +533,7 @@ class _ChatScreenState extends State<ChatScreen> {
           'Content-Type': 'application/json',
         },
       );
+      print('User profile response: ${response.statusCode} ${response.body}');
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         setState(() {
@@ -504,15 +544,18 @@ class _ChatScreenState extends State<ChatScreen> {
               ? 'Welcome, $_preferredName!'
               : 'Welcome!';
         });
-        _speakReply("Welcome $_preferredName! I am happy to see you.");
+        print('Speaking welcome message: Welcome $_preferredName');
+        await _tts.speak('Welcome $_preferredName! I am happy to see you.');
       } else if (response.statusCode == 401) {
         await _refreshToken();
-        await _fetchUserProfile(); // Retry
+        await _fetchUserProfile();
       } else {
-        setState(() => _reply = 'Couldn’t load profile.');
+        setState(
+            () => _reply = 'Couldn’t load profile: ${response.statusCode}');
       }
     } catch (e) {
-      setState(() => _reply = 'Network error fetching profile.');
+      setState(() => _reply = 'Network error fetching profile: $e');
+      print('User profile error: $e');
     }
   }
 
@@ -521,10 +564,15 @@ class _ChatScreenState extends State<ChatScreen> {
     final prefs = await SharedPreferences.getInstance();
     final refreshToken = prefs.getString('refresh_token');
     if (refreshToken == null) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => LoginScreen()),
-      );
+      setState(() => _reply = 'No refresh token. Please log in.');
+      print('No refresh token, delaying redirect to LoginScreen');
+      await Future.delayed(Duration(seconds: 2));
+      if (mounted) {
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => LoginScreen()),
+        );
+      }
       return;
     }
     final url = Uri.parse('${backendUrl}auth/token/refresh/');
@@ -534,24 +582,47 @@ class _ChatScreenState extends State<ChatScreen> {
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'refresh': refreshToken}),
       );
+      print('Refresh token response: ${response.statusCode} ${response.body}');
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         await prefs.setString('access_token', data['access']);
         setState(() => _accessToken = data['access']);
-        print('New access token: $_accessToken');
+        print('New access token set');
       } else {
-        print('Refresh failed, redirecting to login');
+        setState(() => _reply = 'Token refresh failed: ${response.statusCode}');
+        print('Token refresh failed, delaying redirect to LoginScreen');
+        await Future.delayed(Duration(seconds: 2));
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => LoginScreen()),
+          );
+        }
+      }
+    } catch (e) {
+      setState(() => _reply = 'Network error refreshing token: $e');
+      print('Token refresh error, delaying redirect to LoginScreen');
+      await Future.delayed(Duration(seconds: 2));
+      if (mounted) {
         Navigator.pushReplacement(
           context,
           MaterialPageRoute(builder: (_) => LoginScreen()),
         );
       }
-    } catch (e) {
-      Navigator.pushReplacement(
-        context,
-        MaterialPageRoute(builder: (_) => LoginScreen()),
-      );
     }
+  }
+
+  Future<void> _loadPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    setState(() {
+      _preferredName = prefs.getString('preferred_name') ?? '';
+      _city = prefs.getString('city') ?? 'Boston';
+      _accountStatus = prefs.getString('account_status') ?? 'active';
+      _showCaptions = prefs.getBool('show_captions') ?? true;
+      _isGazeEnabled = prefs.getBool('gaze_enabled') ?? true;
+    });
+    print(
+        'Preferences loaded: name=$_preferredName, city=$_city, captions=$_showCaptions');
   }
 
   //
@@ -566,40 +637,52 @@ class _ChatScreenState extends State<ChatScreen> {
         _reply = 'Microphone permission denied. Please enable in settings.';
         _micError = true;
       });
-      await openAppSettings();
+      print('Microphone permission denied');
       return;
     }
     bool available = await _speech.initialize(
       onStatus: (status) {
         print('Speech status: $status');
-        // Only restart if gaze active or question pending
+        setState(() => _isListening = status == 'listening');
         if ((status == 'done' || status == 'notListening') &&
             _isListening &&
             mounted &&
             (_isGazeActive || _isQuestionPending)) {
-          Future.delayed(Duration(milliseconds: 200), () {
-            if (_isListening && mounted) _startListening();
+          Future.delayed(Duration(milliseconds: 500), () {
+            if (_isListening && mounted) {
+              print('Restarting listening due to gaze or question');
+              _startListening();
+            }
           });
         }
       },
       onError: (error) {
-        print('Speech error details: $error');
-        if (error.errorMsg.contains('timeout')) {
-          if (_isListening && mounted) _startListening();
-        } else if (error.errorMsg.contains('client') && error.permanent) {
-          setState(() {
-            _reply = 'Microphone error. Check emulator audio settings.';
-            _micError = true;
-            _isListening = false;
+        print('Speech error: $error');
+        setState(() {
+          _isListening = false;
+          _reply = 'Speech error: ${error.errorMsg}. Retrying...';
+          if (error.permanent) _micError = true;
+        });
+        if (error.permanent) {
+          Future.delayed(Duration(seconds: 2), () {
+            if (mounted) {
+              print('Retrying speech initialization');
+              _micError = false;
+              _initSpeech();
+            }
           });
         }
       },
+      debugLogging: true,
     );
     if (!available) {
       setState(() {
         _reply = 'Speech initialization failed. Check microphone permissions.';
         _micError = true;
       });
+      print('Speech initialization failed');
+    } else {
+      print('Speech initialized successfully');
     }
   }
 
@@ -609,58 +692,52 @@ class _ChatScreenState extends State<ChatScreen> {
   //  - Mic’s on → hears “hey [message]” → processes → speaks → restarts after 100ms.
   //  - Console: “listening” → phrase → “done” (after 4s silence) → quick restart.
   //
-  void _startListening({bool requireTrigger = true}) async {
-    if (!_isListening && await _speech.initialize() && !_micError) {
-      setState(() => _isListening = true);
+  Future<void> _startListening({bool requireTrigger = false}) async {
+    if (_micError || _isSpeaking || !mounted) {
+      print(
+          'Cannot start listening: micError=$_micError, isSpeaking=$_isSpeaking');
+      return;
     }
     await _speech.stop();
-    await Future.delayed(Duration(milliseconds: 10));
-    if (_isListening &&
-        mounted &&
-        (_isGazeActive || _isQuestionPending || !requireTrigger)) {
-      _speech.listen(
-        listenFor: Duration(seconds: 30),
-        pauseFor: Duration(seconds: 5),
-        cancelOnError: false,
-        partialResults: true,
-        onResult: (result) {
-          String words = result.recognizedWords.toLowerCase();
-          setState(() => _lastWords = words);
-          if (words.isNotEmpty) {
-            setState(() => _isSpeaking = true);
-            _speechSilenceTimer?.cancel();
-            _speechSilenceTimer = Timer(Duration(seconds: 2), () {
-              if (_isListening && mounted) {
-                setState(() => _isSpeaking = false);
-                String message = _isQuestionPending && !requireTrigger
-                    ? words
-                    : words.startsWith(_triggerWord)
-                        ? words.replaceFirst(_triggerWord, '').trim()
-                        : '';
-                if (message.isNotEmpty) {
-                  setState(() => _isProcessing = true);
-                  _sendMessage(message).then((_) {
-                    if (mounted) {
-                      setState(() {
-                        _isProcessing = false;
-                        _isQuestionPending = false;
-                      });
-                      if (_isGazeActive && !_isListening) {
-                        _startListening(requireTrigger: !_isQuestionPending);
-                      }
-                    }
-                  });
-                }
-                if (!_isGazeActive && !_isQuestionPending) {
-                  _stopListening();
-                }
-              }
-            });
+    bool available = await _speech.listen(
+      onResult: (result) {
+        setState(() {
+          _lastWords = result.recognizedWords;
+          print('Recognized words: $_lastWords, final=${result.finalResult}');
+        });
+        if (result.finalResult && _lastWords.isNotEmpty) {
+          String message = _lastWords;
+          if (requireTrigger &&
+              _lastWords.toLowerCase().startsWith(_triggerWord)) {
+            message = _lastWords.substring(_triggerWord.length).trim();
           }
-        },
-      );
+          if (message.isNotEmpty) {
+            print('Sending to API: $message');
+            _sendToApi(message);
+          }
+        }
+      },
+      listenFor: Duration(seconds: 30),
+      pauseFor: Duration(seconds: 5),
+      partialResults: true,
+      onDevice: false,
+      cancelOnError: false,
+      listenMode: ListenMode.dictation,
+    );
+    if (available) {
+      setState(() {
+        _isListening = true;
+        _reply = 'Listening...';
+      });
+      print('Listening started');
     } else {
-      _stopListening();
+      setState(() => _reply = 'Failed to start listening. Retrying...');
+      print('Failed to start listening');
+      Future.delayed(Duration(seconds: 2), () {
+        if (mounted && (_isGazeActive || _isQuestionPending)) {
+          _startListening(requireTrigger: requireTrigger);
+        }
+      });
     }
   }
 
@@ -670,13 +747,124 @@ class _ChatScreenState extends State<ChatScreen> {
   //   _speech.stop(): Turns off mic immediately.
   // Expected Behavior
   //   Mic off, no restarts—UI shows “mic off” icon.
-  void _stopListening() {
+  Future<void> _stopListening() async {
+    if (!_isListening) return;
+    await _speech.stop();
     setState(() {
       _isListening = false;
-      _isSpeaking = false;
+      _reply = _lastWords.isEmpty ? 'Gaze inactive' : _lastWords;
     });
-    _speechSilenceTimer?.cancel();
-    _speech.stop();
+    print('Listening stopped');
+  }
+
+  //
+  // _sendToApi
+  //
+  Future<void> _sendToApi(String text) async {
+    print(
+        'sendToApi called with text: "$text", username: "$_username", token: ${_accessToken != null ? "valid" : "null"}');
+    // Re-check SharedPreferences
+    final prefs = await SharedPreferences.getInstance();
+    final accessToken = prefs.getString('access_token');
+    final username = prefs.getString('username') ?? '';
+    if (accessToken != _accessToken || username != _username) {
+      setState(() {
+        _accessToken = accessToken;
+        _username = username;
+      });
+      print(
+          'Updated from SharedPreferences: username=$username, token=${accessToken != null ? "valid" : "null"}');
+    }
+    if (text.isEmpty || _username.isEmpty || _accessToken == null) {
+      setState(() =>
+          _reply = 'Error: Empty message, username, or token. Please log in.');
+      print(
+          'sendToApi aborted: text=$text, username=$_username, token=$_accessToken');
+      await Future.delayed(Duration(seconds: 5)); // Show error
+      if (_accessToken == null || _username.isEmpty) {
+        if (mounted) {
+          Navigator.pushReplacement(
+            context,
+            MaterialPageRoute(builder: (_) => LoginScreen()),
+          );
+        }
+      }
+      return;
+    }
+    try {
+      setState(() {
+        _isSpeaking = true;
+        _reply = 'Sending: $text...';
+      });
+      final body = jsonEncode({
+        'message': text,
+        'user_id': _username,
+      });
+      print('Sending API request to ${backendUrl}talk/ with body: $body');
+      final response = await http
+          .post(
+            Uri.parse('${backendUrl}talk/'),
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': 'Bearer $_accessToken',
+            },
+            body: body,
+          )
+          .timeout(Duration(seconds: 15));
+      print('API response: ${response.statusCode} ${response.body}');
+      if (response.statusCode == 200) {
+        try {
+          final data = jsonDecode(response.body);
+          final reply = data['response']?.toString() ??
+              data.toString() ??
+              'No response from server';
+          setState(() {
+            _reply = reply;
+            _isQuestionPending = data['is_question'] ?? false;
+            _isSpeaking = false;
+          });
+          print('Processed response: $reply, isQuestion: $_isQuestionPending');
+          if (_showCaptions) {
+            print('Speaking response: $reply');
+            await _tts.speak(reply);
+          } else {
+            print('Captions disabled, skipping TTS');
+          }
+        } catch (e) {
+          setState(() {
+            _reply = 'Error parsing response: $e';
+            _isSpeaking = false;
+          });
+          print('JSON parse error: $e');
+        }
+      } else if (response.statusCode == 401) {
+        print('Unauthorized, refreshing token');
+        await _refreshToken();
+        await _sendToApi(text); // Retry
+      } else {
+        setState(() {
+          _reply = 'Server error: ${response.statusCode} ${response.body}';
+          _isSpeaking = false;
+        });
+        print('API error: ${response.statusCode} ${response.body}');
+      }
+    } catch (e) {
+      setState(() {
+        _reply = 'Network error: $e';
+        _isSpeaking = false;
+      });
+      print('API network error: $e');
+    }
+  }
+
+  //
+  // _sendMessage
+  //
+  Future<void> _sendMessage(String text) async {
+    print('sendMessage called with text: "$text"');
+    setState(() => _reply = 'Processing: $text...');
+    await _sendToApi(text);
+    print('sendMessage completed');
   }
 
   //
@@ -694,8 +882,7 @@ class _ChatScreenState extends State<ChatScreen> {
         permission = await Geolocator.requestPermission();
         if (permission == LocationPermission.denied) {
           setState(
-            () => _reply = 'I need location permission to get the weather!',
-          );
+              () => _reply = 'I need location permission to get the weather!');
           return;
         }
       }
@@ -712,6 +899,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _temp = 'unknown';
         _city = 'unknown';
       });
+      print('Location error: $e');
     }
   }
 
@@ -724,13 +912,11 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() => _temp = "No location");
       return;
     }
-
-    final url = Uri.parse(
-      '${backendUrl}weather/?lat=$_lat&lon=$_lon&units=$_units',
-    );
+    final url =
+        Uri.parse('${backendUrl}weather/?lat=$_lat&lon=$_lon&units=$_units');
     try {
       final response = await http.get(url);
-
+      print('Weather response: ${response.statusCode} ${response.body}');
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         setState(() {
@@ -744,49 +930,13 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     } catch (e) {
       setState(() => _temp = "Network error");
+      print('Weather network error: $e');
     }
   }
 
   //
-  // Send a message to the backend API
+  // Send a message to the backend speech API
   //
-  Future<void> _sendMessage(String message) async {
-    final url = Uri.parse('${backendUrl}talk/');
-    try {
-      final response = await http.post(
-        url,
-        headers: {
-          'Authorization': 'Bearer $_accessToken',
-          'Content-Type': 'application/json',
-        },
-        body: jsonEncode({
-          'message': message,
-          'city': _city,
-        }),
-      );
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        setState(() {
-          _reply = data['reply'] ?? 'No response';
-          // Use-case 3: Detect if response is a question
-          _isQuestionPending = _reply.trim().endsWith('?');
-        });
-        await _speakReply(data['reply']);
-        if (_isQuestionPending && mounted) {
-          // Start listening for answer without trigger
-          _startListening(requireTrigger: false);
-        }
-      } else if (response.statusCode == 401) {
-        await _refreshToken();
-        await _sendMessage(message);
-      } else {
-        setState(() => _reply = 'Error: ${response.body}');
-      }
-    } catch (e) {
-      setState(() => _reply = 'Can’t connect to chat service.');
-    }
-  }
-
   Future<void> _speakReply(String text) async {
     final tts = FlutterTts();
     try {
@@ -807,7 +957,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Widget build(BuildContext context) {
     final time = DateTime.now();
     final isDay = time.hour >= 6 && time.hour < 18;
-    String weatherBg = 'sunny'; // Default
+    String weatherBg = 'sunny';
     try {
       final tempValue = int.tryParse(_temp);
       if (_temp != 'unknown' && tempValue != null) {
@@ -815,7 +965,7 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     } catch (e) {
       print('Error parsing _temp: $e');
-      weatherBg = 'sunny'; // Fallback
+      weatherBg = 'sunny';
     }
 
     return Scaffold(
@@ -825,8 +975,7 @@ class _ChatScreenState extends State<ChatScreen> {
             decoration: BoxDecoration(
               image: DecorationImage(
                 image: AssetImage(
-                  'assets/room_${weatherBg}_${isDay ? 'day' : 'night'}.png',
-                ),
+                    'assets/room_${weatherBg}_${isDay ? 'day' : 'night'}.png'),
                 fit: BoxFit.cover,
               ),
             ),
@@ -916,6 +1065,7 @@ class _ChatScreenState extends State<ChatScreen> {
               icon: Icon(Icons.bug_report, color: Colors.white),
               onPressed: () {
                 setState(() => _showDebugOverlay = !_showDebugOverlay);
+                print('Debug overlay toggled: $_showDebugOverlay');
               },
             ),
           ),
@@ -928,7 +1078,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 padding: EdgeInsets.all(8),
                 child: Column(
                   children: [
-                    Text('Debug: Gaze & Mic',
+                    Text('Debug: Gaze, Mic, API',
                         style: TextStyle(color: Colors.white)),
                     ElevatedButton(
                       onPressed: () {
@@ -936,8 +1086,9 @@ class _ChatScreenState extends State<ChatScreen> {
                         _gazeDetector?.dispose();
                         _gazeDetector = createGazeDetector();
                         _initGazeDetector();
+                        print('Retrying gaze detection');
                       },
-                      child: Text('Retry Gaze Detection'),
+                      child: Text('Retry Gaze'),
                     ),
                     ElevatedButton(
                       onPressed: () {
@@ -950,10 +1101,48 @@ class _ChatScreenState extends State<ChatScreen> {
                         ]).then((result) {
                           if (result.exitCode != 0) {
                             print('Failed to launch camera: ${result.stderr}');
+                            setState(() => _reply = 'Failed to launch camera.');
+                          } else {
+                            print('Camera app launched');
                           }
                         });
                       },
                       child: Text('Test Webcam'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () {
+                        _speech.stop();
+                        _micError = false;
+                        _initSpeech();
+                        print('Retrying speech initialization');
+                      },
+                      child: Text('Retry Speech'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () async {
+                        print('Testing TTS');
+                        await _tts.speak('Test TTS');
+                      },
+                      child: Text('Test TTS'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () async {
+                        print('Testing API');
+                        await _sendToApi('Test message');
+                      },
+                      child: Text('Test API'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () async {
+                        print('Retrying login');
+                        final prefs = await SharedPreferences.getInstance();
+                        await prefs.clear();
+                        Navigator.pushReplacement(
+                          context,
+                          MaterialPageRoute(builder: (_) => LoginScreen()),
+                        );
+                      },
+                      child: Text('Retry Login'),
                     ),
                   ],
                 ),
