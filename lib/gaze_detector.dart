@@ -21,11 +21,9 @@ class GazeDetectorImpl implements GazeDetector {
   int _frameCount = 0;
   int _gazeOnCount = 0;
   int _gazeOffCount = 0;
-  static const int _frameSkip = 10;
-  static const int _debounceFrames = 15;
-  static const int _faceLossTimeoutFrames = 50;
-  static const InputImageRotation _imageRotation =
-      InputImageRotation.rotation0deg;
+  static const int _frameSkip = 5;
+  static const int _debounceFrames = 10;
+  static const int _faceLossTimeoutFrames = 100;
 
   GazeDetectorImpl() {
     _faceDetector = FaceDetector(
@@ -34,7 +32,7 @@ class GazeDetectorImpl implements GazeDetector {
         enableLandmarks: true,
         enableTracking: true,
         performanceMode: FaceDetectorMode.accurate,
-        minFaceSize: 0.05,
+        minFaceSize: 0.1,
       ),
     );
   }
@@ -56,7 +54,7 @@ class GazeDetectorImpl implements GazeDetector {
           'Sensor: ${frontCamera.sensorOrientation}');
       _cameraController = CameraController(
         frontCamera,
-        ResolutionPreset.low,
+        ResolutionPreset.low, // Reverted to 320x240 to test stability
         enableAudio: false,
       );
       await _cameraController!.initialize();
@@ -79,7 +77,10 @@ class GazeDetectorImpl implements GazeDetector {
     _gazeOffCount = 0;
     _cameraController!.startImageStream((image) async {
       _frameCount++;
-      if (_frameCount % _frameSkip != 0 || _isProcessing) return;
+      if (_frameCount % _frameSkip != 0 || _isProcessing) {
+        print('Skipping frame: $_frameCount, Processing: $_isProcessing');
+        return;
+      }
       _isProcessing = true;
       try {
         final inputImage = _convertCameraImage(image);
@@ -90,11 +91,12 @@ class GazeDetectorImpl implements GazeDetector {
           final face = faces.first;
           final leftEye = face.leftEyeOpenProbability;
           final rightEye = face.rightEyeOpenProbability;
-          print('LeftEye: $leftEye, RightEye: $rightEye');
+          print('LeftEye: $leftEye, RightEye: $rightEye, '
+              'TrackingID: ${face.trackingId}');
           newGazeState = leftEye != null &&
               rightEye != null &&
-              leftEye > 0.15 &&
-              rightEye > 0.15;
+              leftEye > 0.1 &&
+              rightEye > 0.1;
         } else {
           print(
               'No faces detected. Possible causes: lighting, distance, rotation, or webcam issue.');
@@ -109,11 +111,11 @@ class GazeDetectorImpl implements GazeDetector {
         if (_gazeOnCount >= _debounceFrames && !_isGazeActive) {
           _isGazeActive = true;
           onGazeStateChanged(true);
-          print('Gaze active');
+          print('Gaze active, Frames: $_gazeOnCount');
         } else if (_gazeOffCount >= _faceLossTimeoutFrames && _isGazeActive) {
           _isGazeActive = false;
           onGazeStateChanged(false);
-          print('Gaze inactive due to prolonged face absence');
+          print('Gaze inactive, Frames: $_gazeOffCount');
         }
       } catch (e) {
         print('Face detection error: $e');
@@ -162,23 +164,46 @@ class GazeDetectorImpl implements GazeDetector {
       final yBytes = yPlane.bytes;
       final uBytes = uPlane.bytes;
       final vBytes = vPlane.bytes;
-      final totalSize = yBytes.length + uBytes.length + vBytes.length;
+      print(
+          'Plane sizes: Y=${yBytes.length}, U=${uBytes.length}, V=${vBytes.length}');
+      // NV21 format: Y plane followed by interleaved V/U
+      final totalSize = yBytes.length + (uBytes.length * 2);
       final bytes = Uint8List(totalSize);
       int offset = 0;
+      // Copy Y plane
       bytes.setRange(offset, offset + yBytes.length, yBytes);
       offset += yBytes.length;
+      // Interleave V and U planes
       for (int i = 0; i < uBytes.length; i++) {
-        bytes[offset++] = vBytes[i];
-        bytes[offset++] = uBytes[i];
+        bytes[offset++] = vBytes[i]; // V
+        bytes[offset++] = uBytes[i]; // U
       }
       print(
           'ByteBuffer size: ${bytes.length}, Expected: ${width * height * 3 ~/ 2}');
+      // Determine rotation based on camera sensor orientation
+      final sensorOrientation =
+          _cameraController!.description.sensorOrientation;
+      InputImageRotation rotation;
+      switch (sensorOrientation) {
+        case 90:
+          rotation = InputImageRotation.rotation90deg;
+          break;
+        case 180:
+          rotation = InputImageRotation.rotation180deg;
+          break;
+        case 270:
+          rotation = InputImageRotation.rotation270deg;
+          break;
+        default:
+          rotation = InputImageRotation.rotation0deg;
+      }
+      print('Sensor orientation: $sensorOrientation, Rotation: $rotation');
       return InputImage.fromBytes(
         bytes: bytes,
         metadata: InputImageMetadata(
           size: Size(width.toDouble(), height.toDouble()),
-          rotation: _imageRotation,
-          format: InputImageFormat.nv21,
+          rotation: rotation,
+          format: InputImageFormat.nv21, // Try NV21 first
           bytesPerRow: yPlane.bytesPerRow,
         ),
       );
