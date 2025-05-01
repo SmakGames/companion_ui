@@ -21,9 +21,10 @@ class GazeDetectorImpl implements GazeDetector {
   int _frameCount = 0;
   int _gazeOnCount = 0;
   int _gazeOffCount = 0;
-  static const int _frameSkip = 5;
-  static const int _debounceFrames = 10;
-  static const int _faceLossTimeoutFrames = 100;
+  static const int _frameSkip =
+      3; // Process every 3rd frame (~10 FPS at 30 FPS)
+  static const int _debounceFrames = 5; // ~0.5s to confirm gaze
+  static const int _faceLossTimeoutFrames = 5; // ~3s to lose gaze 30
 
   GazeDetectorImpl() {
     _faceDetector = FaceDetector(
@@ -31,8 +32,8 @@ class GazeDetectorImpl implements GazeDetector {
         enableClassification: true,
         enableLandmarks: true,
         enableTracking: true,
-        performanceMode: FaceDetectorMode.accurate,
-        minFaceSize: 0.1,
+        performanceMode: FaceDetectorMode.fast, // Try fast mode for emulator
+        minFaceSize: 0.05, // Detect smaller faces
       ),
     );
   }
@@ -54,7 +55,7 @@ class GazeDetectorImpl implements GazeDetector {
           'Sensor: ${frontCamera.sensorOrientation}');
       _cameraController = CameraController(
         frontCamera,
-        ResolutionPreset.low, // Reverted to 320x240 to test stability
+        ResolutionPreset.medium, // 720x480 for better detail
         enableAudio: false,
       );
       await _cameraController!.initialize();
@@ -91,15 +92,19 @@ class GazeDetectorImpl implements GazeDetector {
           final face = faces.first;
           final leftEye = face.leftEyeOpenProbability;
           final rightEye = face.rightEyeOpenProbability;
-          print('LeftEye: $leftEye, RightEye: $rightEye, '
+          final faceWidth = face.boundingBox.width;
+          final faceHeight = face.boundingBox.height;
+          print('Face size: ${faceWidth}x${faceHeight}, '
+              'LeftEye: $leftEye, RightEye: $rightEye, '
               'TrackingID: ${face.trackingId}');
           newGazeState = leftEye != null &&
               rightEye != null &&
-              leftEye > 0.1 &&
-              rightEye > 0.1;
+              leftEye > 0.2 && // Slightly higher threshold for reliability
+              rightEye > 0.2;
         } else {
           print(
-              'No faces detected. Possible causes: lighting, distance, rotation, or webcam issue.');
+              'No faces detected. Check: resolution, lighting, distance (~18in), '
+              'webcam focus, or facial hair interference.');
         }
         if (newGazeState) {
           _gazeOnCount++;
@@ -203,7 +208,7 @@ class GazeDetectorImpl implements GazeDetector {
         metadata: InputImageMetadata(
           size: Size(width.toDouble(), height.toDouble()),
           rotation: rotation,
-          format: InputImageFormat.nv21, // Try NV21 first
+          format: InputImageFormat.nv21,
           bytesPerRow: yPlane.bytesPerRow,
         ),
       );
