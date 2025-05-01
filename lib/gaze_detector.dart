@@ -21,10 +21,9 @@ class GazeDetectorImpl implements GazeDetector {
   int _frameCount = 0;
   int _gazeOnCount = 0;
   int _gazeOffCount = 0;
-  static const int _frameSkip =
-      3; // Process every 3rd frame (~10 FPS at 30 FPS)
+  static const int _frameSkip = 3; // ~10 FPS at 30 FPS
   static const int _debounceFrames = 5; // ~0.5s to confirm gaze
-  static const int _faceLossTimeoutFrames = 5; // ~3s to lose gaze 30
+  static const int _faceLossTimeoutFrames = 5; // ~0.5s to lose gaze
 
   GazeDetectorImpl() {
     _faceDetector = FaceDetector(
@@ -32,8 +31,8 @@ class GazeDetectorImpl implements GazeDetector {
         enableClassification: true,
         enableLandmarks: true,
         enableTracking: true,
-        performanceMode: FaceDetectorMode.fast, // Try fast mode for emulator
-        minFaceSize: 0.05, // Detect smaller faces
+        performanceMode: FaceDetectorMode.fast,
+        minFaceSize: 0.05,
       ),
     );
   }
@@ -55,7 +54,7 @@ class GazeDetectorImpl implements GazeDetector {
           'Sensor: ${frontCamera.sensorOrientation}');
       _cameraController = CameraController(
         frontCamera,
-        ResolutionPreset.medium, // 720x480 for better detail
+        ResolutionPreset.medium, // 720x480
         enableAudio: false,
       );
       await _cameraController!.initialize();
@@ -94,13 +93,15 @@ class GazeDetectorImpl implements GazeDetector {
           final rightEye = face.rightEyeOpenProbability;
           final faceWidth = face.boundingBox.width;
           final faceHeight = face.boundingBox.height;
+          final headYaw = face.headEulerAngleY ?? 0.0; // Yaw (left/right)
           print('Face size: ${faceWidth}x${faceHeight}, '
               'LeftEye: $leftEye, RightEye: $rightEye, '
-              'TrackingID: ${face.trackingId}');
+              'HeadYaw: $headYaw, TrackingID: ${face.trackingId}');
           newGazeState = leftEye != null &&
               rightEye != null &&
-              leftEye > 0.2 && // Slightly higher threshold for reliability
-              rightEye > 0.2;
+              leftEye > 0.2 &&
+              rightEye > 0.2 &&
+              headYaw.abs() < 20.0; // Face directed within ±20 degrees
         } else {
           print(
               'No faces detected. Check: resolution, lighting, distance (~18in), '
