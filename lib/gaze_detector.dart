@@ -24,6 +24,7 @@ class GazeDetectorImpl implements GazeDetector {
   static const int _frameSkip = 3; // ~10 FPS at 30 FPS
   static const int _debounceFrames = 5; // ~0.5s to confirm gaze
   static const int _faceLossTimeoutFrames = 5; // ~0.5s to lose gaze
+  int? _trackedFaceId; // Track the primary face
 
   GazeDetectorImpl() {
     _faceDetector = FaceDetector(
@@ -75,6 +76,7 @@ class GazeDetectorImpl implements GazeDetector {
     _frameCount = 0;
     _gazeOnCount = 0;
     _gazeOffCount = 0;
+    _trackedFaceId = null; // Reset tracked face
     _cameraController!.startImageStream((image) async {
       _frameCount++;
       if (_frameCount % _frameSkip != 0 || _isProcessing) {
@@ -87,25 +89,41 @@ class GazeDetectorImpl implements GazeDetector {
         final faces = await _faceDetector!.processImage(inputImage);
         print('Frame: $_frameCount, Faces detected: ${faces.length}');
         bool newGazeState = false;
+        Face? selectedFace;
         if (faces.isNotEmpty) {
-          final face = faces.first;
-          final leftEye = face.leftEyeOpenProbability;
-          final rightEye = face.rightEyeOpenProbability;
-          final faceWidth = face.boundingBox.width;
-          final faceHeight = face.boundingBox.height;
-          final headYaw = face.headEulerAngleY ?? 0.0; // Yaw (left/right)
-          print('Face size: ${faceWidth}x${faceHeight}, '
+          // Try to find the tracked face
+          if (_trackedFaceId != null) {
+            selectedFace = faces.firstWhere(
+              (face) => face.trackingId == _trackedFaceId,
+              orElse: () => faces.first,
+            );
+          } else {
+            // Select the largest face (closest to camera)
+            selectedFace = faces.reduce((a, b) {
+              final aArea = a.boundingBox.width * a.boundingBox.height;
+              final bArea = b.boundingBox.width * b.boundingBox.height;
+              return aArea > bArea ? a : b;
+            });
+            _trackedFaceId = selectedFace.trackingId;
+          }
+          final leftEye = selectedFace.leftEyeOpenProbability;
+          final rightEye = selectedFace.rightEyeOpenProbability;
+          final faceWidth = selectedFace.boundingBox.width;
+          final faceHeight = selectedFace.boundingBox.height;
+          final headYaw = selectedFace.headEulerAngleY ?? 0.0;
+          print('Selected face: Size: ${faceWidth}x${faceHeight}, '
               'LeftEye: $leftEye, RightEye: $rightEye, '
-              'HeadYaw: $headYaw, TrackingID: ${face.trackingId}');
+              'HeadYaw: $headYaw, TrackingID: ${selectedFace.trackingId}');
           newGazeState = leftEye != null &&
               rightEye != null &&
               leftEye > 0.2 &&
               rightEye > 0.2 &&
-              headYaw.abs() < 20.0; // Face directed within ±20 degrees
+              headYaw.abs() < 20.0;
         } else {
           print(
               'No faces detected. Check: resolution, lighting, distance (~18in), '
               'webcam focus, or facial hair interference.');
+          _trackedFaceId = null; // Reset tracking if no faces
         }
         if (newGazeState) {
           _gazeOnCount++;
@@ -117,11 +135,14 @@ class GazeDetectorImpl implements GazeDetector {
         if (_gazeOnCount >= _debounceFrames && !_isGazeActive) {
           _isGazeActive = true;
           onGazeStateChanged(true);
-          print('Gaze active, Frames: $_gazeOnCount');
+          print(
+              'Gaze active, Frames: $_gazeOnCount, TrackingID: $_trackedFaceId');
         } else if (_gazeOffCount >= _faceLossTimeoutFrames && _isGazeActive) {
           _isGazeActive = false;
           onGazeStateChanged(false);
-          print('Gaze inactive, Frames: $_gazeOffCount');
+          print(
+              'Gaze inactive, Frames: $_gazeOffCount, TrackingID: $_trackedFaceId');
+          _trackedFaceId = null; // Reset tracking on gaze loss
         }
       } catch (e) {
         print('Face detection error: $e');
@@ -140,6 +161,7 @@ class GazeDetectorImpl implements GazeDetector {
     _frameCount = 0;
     _gazeOnCount = 0;
     _gazeOffCount = 0;
+    _trackedFaceId = null;
     print('Gaze detection stopped');
   }
 
