@@ -316,6 +316,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _showDebugOverlay = false;
   bool _isSpeaking = false;
   bool _isQuestionPending = false;
+  bool _hasSpoken = false;
   GazeDetector? _gazeDetector;
   Timer? _weatherTimer;
   Timer? _speechSilenceTimer;
@@ -418,7 +419,6 @@ class _ChatScreenState extends State<ChatScreen> {
             if (!isGazing && !_gazeDetectionFailed) {
               _gazeFailureTimer?.cancel();
               _gazeFailureTimer = Timer(Duration(seconds: 20), () {
-                // Extended to 20s
                 if (mounted) {
                   setState(() {
                     _gazeDetectionFailed = true;
@@ -625,61 +625,71 @@ class _ChatScreenState extends State<ChatScreen> {
       onStatus: (status) {
         print('Speech status: $status');
         setState(() => _isListening = status == 'listening');
-        if ((status == 'done' || status == 'notListening') &&
-            _isListening &&
-            mounted &&
-            (_isGazeActive || _isQuestionPending)) {
-          Future.delayed(Duration(milliseconds: 500), () {
-            if (_isListening && mounted) {
-              print('Restarting listening due to gaze or question');
-              _startListening();
-            }
-          });
+        if ((status == 'done' || status == 'notListening') && mounted) {
+          print('Speech stopped, checking restart: gaze=$_isGazeActive, '
+              'questionPending=$_isQuestionPending, hasSpoken=$_hasSpoken');
+          if (_isGazeActive && !_isSpeaking && !_micError) {
+            Future.delayed(Duration(milliseconds: 500), () {
+              if (mounted && !_isListening && !_isSpeaking) {
+                print('Restarting listening due to gaze');
+                _startListening(requireTrigger: _gazeDetectionFailed);
+              }
+            });
+          } else if (_hasSpoken && !_isGazeActive) {
+            setState(() => _reply = 'Gaze inactive, mic stopped');
+          }
         }
       },
       onError: (error) {
         print('Speech error: $error');
         setState(() {
           _isListening = false;
-          _reply = 'Speech error: ${error.errorMsg}. Retrying...';
-          if (error.permanent) _micError = true;
+          _reply =
+              'Speech error: ${error.errorMsg}. Check emulator audio or retry.';
+          if (error.permanent && error.errorMsg != 'error_no_match') {
+            _micError = true; // Only set for non-no_match errors
+          }
         });
-        if (error.permanent) {
-          Future.delayed(Duration(seconds: 2), () {
-            if (mounted) {
-              print('Retrying speech initialization');
-              _micError = false;
-              _initSpeech();
-            }
-          });
-        }
+        Future.delayed(Duration(seconds: 2), () {
+          if (mounted) {
+            print('Retrying speech initialization');
+            _micError = false; // Clear micError for retry
+            _initSpeech();
+          }
+        });
       },
       debugLogging: true,
     );
     if (!available) {
       setState(() {
-        _reply = 'Speech initialization failed. Check microphone permissions.';
+        _reply =
+            'Speech initialization failed. Check microphone permissions or emulator audio.';
         _micError = true;
       });
       print('Speech initialization failed');
     } else {
       print('Speech initialized successfully');
+      setState(() => _micError = false); // Ensure clean start
     }
   }
 
   Future<void> _startListening({bool requireTrigger = false}) async {
-    if (_micError || _isSpeaking || !mounted) {
+    if (_isSpeaking || !mounted) {
       print(
-          'Cannot start listening: micError=$_micError, isSpeaking=$_isSpeaking');
+          'Cannot start listening: isSpeaking=$_isSpeaking, mounted=$mounted');
       return;
     }
-    await _speech.stop();
+    await _speech.stop(); // Ensure clean start
     bool available = await _speech.listen(
       onResult: (result) {
         setState(() {
           _lastWords = result.recognizedWords;
-          print('Recognized words: $_lastWords, final=${result.finalResult}');
+          print(
+              'Recognized words: $_lastWords, final=${result.finalResult}, hasSpoken=$_hasSpoken');
         });
+        if (_lastWords.isNotEmpty) {
+          _hasSpoken = true;
+        }
         if (result.finalResult && _lastWords.isNotEmpty) {
           String message = _lastWords;
           if (requireTrigger &&
@@ -689,11 +699,12 @@ class _ChatScreenState extends State<ChatScreen> {
           if (message.isNotEmpty) {
             print('Sending to API: $message');
             _sendToApi(message);
+            setState(() => _lastWords = '');
           }
         }
       },
-      listenFor: Duration(seconds: 30),
-      pauseFor: Duration(seconds: 5),
+      listenFor: Duration(seconds: 60),
+      pauseFor: Duration(seconds: 15), // Extended for longer pauses
       partialResults: true,
       onDevice: false,
       cancelOnError: false,
@@ -703,14 +714,17 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() {
         _isListening = true;
         _reply = 'Listening...';
+        if (_micError) {
+          _micError = false; // Clear micError on successful start
+          _reply = 'Listening resumed';
+        }
       });
       print('Listening started');
     } else {
       setState(() => _reply = 'Failed to start listening. Retrying...');
       print('Failed to start listening');
       Future.delayed(Duration(seconds: 2), () {
-        if (mounted &&
-            (_isGazeActive || _isQuestionPending || _gazeDetectionFailed)) {
+        if (mounted && !_isSpeaking && (_isGazeActive || _isQuestionPending)) {
           _startListening(requireTrigger: requireTrigger);
         }
       });
@@ -723,6 +737,7 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() {
       _isListening = false;
       _reply = _lastWords.isEmpty ? 'Gaze inactive' : _lastWords;
+      _hasSpoken = false;
     });
     print('Listening stopped');
   }
@@ -783,7 +798,6 @@ class _ChatScreenState extends State<ChatScreen> {
           final data = jsonDecode(response.body);
           print('Parsed JSON: $data');
           String? reply;
-          // Check multiple keys for response text
           for (var key in ['response', 'reply', 'message', 'text']) {
             print('Checking key: $key, value: ${data[key]}');
             if (data[key] != null && data[key].toString().isNotEmpty) {
@@ -801,7 +815,7 @@ class _ChatScreenState extends State<ChatScreen> {
                 'No valid response field in API response. Checked keys: response, reply, message, text');
           } else {
             setState(() {
-              _reply = reply!; // Safe because reply is non-null and non-empty
+              _reply = reply!;
               _isQuestionPending = data['is_question'] ?? false;
               _isSpeaking = false;
             });
@@ -839,6 +853,11 @@ class _ChatScreenState extends State<ChatScreen> {
         _isSpeaking = false;
       });
       print('API network error: $e');
+    } finally {
+      if (_isGazeActive && !_isListening && !_isSpeaking && mounted) {
+        print('Restarting listening after API call');
+        _startListening(requireTrigger: _gazeDetectionFailed);
+      }
     }
   }
 
@@ -994,7 +1013,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 if (_micError)
                   Text(
-                    'Microphone unavailable. Check permissions or emulator audio.',
+                    'Microphone unavailable. Check emulator audio, permissions, or retry.',
                     style: TextStyle(fontSize: 24, color: Colors.red),
                   ),
                 Text(
@@ -1075,8 +1094,23 @@ class _ChatScreenState extends State<ChatScreen> {
                         _micError = false;
                         _initSpeech();
                         print('Retrying speech initialization');
+                        setState(() => _reply = 'Retrying microphone...');
                       },
                       child: Text('Retry Speech'),
+                    ),
+                    ElevatedButton(
+                      onPressed: () {
+                        setState(() {
+                          _micError = false;
+                          _reply = 'Microphone error cleared';
+                        });
+                        if (_isGazeActive && !_isListening && !_isSpeaking) {
+                          _startListening(requireTrigger: _gazeDetectionFailed);
+                        }
+                        print(
+                            'Cleared micError, attempting to start listening');
+                      },
+                      child: Text('Clear Mic Error'),
                     ),
                     ElevatedButton(
                       onPressed: () async {
