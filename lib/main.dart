@@ -320,6 +320,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isSpeaking = false;
   bool _isQuestionPending = false;
   bool _hasSpoken = false;
+  String? _pendingMessage; // For queuing rapid responses
   GazeDetector? _gazeDetector;
   Timer? _weatherTimer;
   Timer? _speechSilenceTimer;
@@ -379,7 +380,7 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       await _tts.setLanguage('en-US');
       await _tts.setSpeechRate(0.5);
-      await _tts.setPitch(1.0);
+      await _tts.setPitch(0.8);
       print('TTS initialized: language=en-US, rate=0.5, pitch=1.0');
     } catch (e) {
       print('TTS init error: $e');
@@ -646,7 +647,7 @@ class _ChatScreenState extends State<ChatScreen> {
           print('Speech stopped, checking restart: gaze=$_isGazeActive, '
               'questionPending=$_isQuestionPending, hasSpoken=$_hasSpoken');
           if (_isGazeActive && !_isSpeaking && !_micError) {
-            Future.delayed(Duration(milliseconds: 500), () {
+            Future.delayed(Duration(milliseconds: 200), () {
               if (mounted && !_isListening && !_isSpeaking) {
                 print('Restarting listening due to gaze');
                 _startListening();
@@ -719,12 +720,13 @@ class _ChatScreenState extends State<ChatScreen> {
           }
         }
       },
-      listenFor: Duration(seconds: 60),
-      pauseFor: Duration(seconds: 15),
+      listenFor: Duration(seconds: 60), // was 60
+      pauseFor: Duration(seconds: 5), // was 15
       partialResults: true,
       onDevice: false,
       cancelOnError: true,
       listenMode: ListenMode.dictation,
+      sampleRate: 16000,
     );
     if (available) {
       setState(() {
@@ -736,10 +738,18 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       });
       print('Listening started');
+      // Process any pending message
+      if (_pendingMessage != null && mounted) {
+        String queuedMessage = _pendingMessage!;
+        _pendingMessage = null;
+        print('Processing queued message: $queuedMessage');
+        _sendToApi(queuedMessage);
+      }
     } else {
       setState(() => _reply = 'Failed to start listening. Retrying...');
       print('Failed to start listening');
       Future.delayed(Duration(seconds: 2), () {
+        // was milliseconds: 500
         if (mounted && !_isSpeaking && (_isGazeActive || _isQuestionPending)) {
           _startListening();
         }
@@ -763,6 +773,12 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _sendToApi(String text) async {
+    // Queue message if already processing
+    if (_isListening && _isSpeaking) {
+      _pendingMessage = text;
+      print('Queuing message: $text');
+      return;
+    }
     print(
         'sendToApi called with text: "$text", username: "$_username", token: ${_accessToken != null ? "valid" : "null"}');
     final prefs = await SharedPreferences.getInstance();
