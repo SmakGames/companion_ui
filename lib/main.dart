@@ -11,8 +11,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'gaze_detector.dart';
+import 'package:just_audio/just_audio.dart'; // Add import
 
-const String backendUrl = 'http://10.0.2.2:8000/api/v1/';
+// const String backendUrl = 'http://10.0.2.2:8000/api/v1/';
+const String backendUrl = 'http://192.168.1.125:8000/api/v1/';
+//const String backendUrl = 'http://192.168.1.100:8000/api/v1/';
 
 void main() {
   runApp(CompanionApp());
@@ -322,6 +325,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Timer? _speechSilenceTimer;
   Timer? _gazeFailureTimer;
   final FlutterTts _tts = FlutterTts();
+  final AudioPlayer _audioPlayer = AudioPlayer(); // Add AudioPlayer
 
   @override
   void initState() {
@@ -352,6 +356,10 @@ class _ChatScreenState extends State<ChatScreen> {
             DateFormat('EEEE, MMMM d, y – hh:mm a').format(DateTime.now());
       });
     });
+    // Initialize silent audio
+    _audioPlayer.setAsset('assets/silent.wav').catchError((e) {
+      print('Error loading silent audio: $e');
+    });
   }
 
   @override
@@ -363,6 +371,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _tts.stop();
     _controller.dispose();
     _gazeDetector?.dispose();
+    _audioPlayer.dispose(); // Dispose AudioPlayer
     super.dispose();
   }
 
@@ -379,9 +388,13 @@ class _ChatScreenState extends State<ChatScreen> {
     _tts.setCompletionHandler(() {
       setState(() => _isSpeaking = false);
       print('TTS speaking completed');
-      if (_isGazeActive && !_isListening && mounted) {
-        print('Restarting listening after TTS completion');
+      if ((_isGazeActive || _isQuestionPending) && !_isListening && mounted) {
+        print(
+            'Restarting listening after TTS completion: gaze=$_isGazeActive, questionPending=$_isQuestionPending');
         _startListening();
+      } else {
+        print(
+            'Not restarting listening: gaze=$_isGazeActive, questionPending=$_isQuestionPending');
       }
     });
     _tts.setErrorHandler((msg) {
@@ -390,6 +403,10 @@ class _ChatScreenState extends State<ChatScreen> {
         _reply = 'TTS error: $msg';
       });
       print('TTS error: $msg');
+      if ((_isGazeActive || _isQuestionPending) && !_isListening && mounted) {
+        print('Restarting listening after TTS error');
+        _startListening();
+      }
     });
   }
 
@@ -632,7 +649,7 @@ class _ChatScreenState extends State<ChatScreen> {
             Future.delayed(Duration(milliseconds: 500), () {
               if (mounted && !_isListening && !_isSpeaking) {
                 print('Restarting listening due to gaze');
-                _startListening(requireTrigger: _gazeDetectionFailed);
+                _startListening();
               }
             });
           } else if (_hasSpoken && !_isGazeActive) {
@@ -673,13 +690,16 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
-  Future<void> _startListening({bool requireTrigger = false}) async {
+  Future<void> _startListening() async {
     if (_isSpeaking || !mounted) {
       print(
           'Cannot start listening: isSpeaking=$_isSpeaking, mounted=$mounted');
       return;
     }
     await _speech.stop(); // Ensure clean start
+    // Play silent audio to suppress system sound
+    await _audioPlayer.seek(Duration.zero);
+    await _audioPlayer.play();
     bool available = await _speech.listen(
       onResult: (result) {
         setState(() {
@@ -691,11 +711,7 @@ class _ChatScreenState extends State<ChatScreen> {
           _hasSpoken = true;
         }
         if (result.finalResult && _lastWords.isNotEmpty) {
-          String message = _lastWords;
-          if (requireTrigger &&
-              _lastWords.toLowerCase().startsWith(_triggerWord)) {
-            message = _lastWords.substring(_triggerWord.length).trim();
-          }
+          String message = _lastWords.trim();
           if (message.isNotEmpty) {
             print('Sending to API: $message');
             _sendToApi(message);
@@ -704,10 +720,10 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       },
       listenFor: Duration(seconds: 60),
-      pauseFor: Duration(seconds: 15), // Extended for longer pauses
+      pauseFor: Duration(seconds: 15),
       partialResults: true,
       onDevice: false,
-      cancelOnError: false,
+      cancelOnError: true,
       listenMode: ListenMode.dictation,
     );
     if (available) {
@@ -715,7 +731,7 @@ class _ChatScreenState extends State<ChatScreen> {
         _isListening = true;
         _reply = 'Listening...';
         if (_micError) {
-          _micError = false; // Clear micError on successful start
+          _micError = false;
           _reply = 'Listening resumed';
         }
       });
@@ -725,7 +741,7 @@ class _ChatScreenState extends State<ChatScreen> {
       print('Failed to start listening');
       Future.delayed(Duration(seconds: 2), () {
         if (mounted && !_isSpeaking && (_isGazeActive || _isQuestionPending)) {
-          _startListening(requireTrigger: requireTrigger);
+          _startListening();
         }
       });
     }
@@ -733,6 +749,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _stopListening() async {
     if (!_isListening) return;
+    await _speech.stop();
+    // Play silent audio to suppress system sound
+    await _audioPlayer.seek(Duration.zero);
+    await _audioPlayer.play();
     await _speech.stop();
     setState(() {
       _isListening = false;
@@ -774,8 +794,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     try {
       setState(() {
-        _isSpeaking = true;
-        _reply = 'Sending: $text...';
+        _reply = 'Processing: $text...';
       });
       final body = jsonEncode({
         'message': text,
@@ -813,19 +832,40 @@ class _ChatScreenState extends State<ChatScreen> {
             });
             print(
                 'No valid response field in API response. Checked keys: response, reply, message, text');
+            // Resume listening if gaze active or question pending
+            if ((_isGazeActive || _isQuestionPending) &&
+                !_isListening &&
+                mounted) {
+              print('Resuming listening after empty response');
+              _startListening();
+            }
           } else {
             setState(() {
               _reply = reply!;
               _isQuestionPending = data['is_question'] ?? false;
-              _isSpeaking = false;
+              _isSpeaking = true;
             });
             print(
                 'Processed response: $reply, isQuestion: $_isQuestionPending');
             if (_showCaptions) {
+              // Stop listening before speaking to prevent capturing TTS
+              if (_isListening) {
+                await _stopListening();
+                print('Stopped listening before TTS');
+              }
               print('Speaking response: $reply');
               await _tts.speak(reply);
+              // Listening resumes in TTS completion handler
             } else {
               print('Captions disabled, skipping TTS');
+              setState(() => _isSpeaking = false);
+              // Resume listening if gaze active or question pending
+              if ((_isGazeActive || _isQuestionPending) &&
+                  !_isListening &&
+                  mounted) {
+                print('Resuming listening after non-TTS response');
+                _startListening();
+              }
             }
           }
         } catch (e) {
@@ -835,6 +875,13 @@ class _ChatScreenState extends State<ChatScreen> {
             _isSpeaking = false;
           });
           print('JSON parse error: $e');
+          // Resume listening if gaze active or question pending
+          if ((_isGazeActive || _isQuestionPending) &&
+              !_isListening &&
+              mounted) {
+            print('Resuming listening after parse error');
+            _startListening();
+          }
         }
       } else if (response.statusCode == 401) {
         print('Unauthorized, refreshing token');
@@ -846,6 +893,11 @@ class _ChatScreenState extends State<ChatScreen> {
           _isSpeaking = false;
         });
         print('API error: ${response.statusCode} ${response.body}');
+        // Resume listening if gaze active or question pending
+        if ((_isGazeActive || _isQuestionPending) && !_isListening && mounted) {
+          print('Resuming listening after API error');
+          _startListening();
+        }
       }
     } catch (e) {
       setState(() {
@@ -853,10 +905,10 @@ class _ChatScreenState extends State<ChatScreen> {
         _isSpeaking = false;
       });
       print('API network error: $e');
-    } finally {
-      if (_isGazeActive && !_isListening && !_isSpeaking && mounted) {
-        print('Restarting listening after API call');
-        _startListening(requireTrigger: _gazeDetectionFailed);
+      // Resume listening if gaze active or question pending
+      if ((_isGazeActive || _isQuestionPending) && !_isListening && mounted) {
+        print('Resuming listening after network error');
+        _startListening();
       }
     }
   }
@@ -1105,7 +1157,7 @@ class _ChatScreenState extends State<ChatScreen> {
                           _reply = 'Microphone error cleared';
                         });
                         if (_isGazeActive && !_isListening && !_isSpeaking) {
-                          _startListening(requireTrigger: _gazeDetectionFailed);
+                          _startListening();
                         }
                         print(
                             'Cleared micError, attempting to start listening');
@@ -1141,7 +1193,7 @@ class _ChatScreenState extends State<ChatScreen> {
                     ElevatedButton(
                       onPressed: () {
                         if (!_isListening) {
-                          _startListening(requireTrigger: true);
+                          _startListening();
                           setState(() => _reply = 'Manual mic activated');
                         } else {
                           _stopListening();
@@ -1164,7 +1216,15 @@ class _ChatScreenState extends State<ChatScreen> {
                 FloatingActionButton(
                   onPressed: _isListening
                       ? _stopListening
-                      : () => _startListening(requireTrigger: true),
+                      : () {
+                          if (_gazeDetectionFailed) {
+                            _startListening();
+                            setState(() => _reply = 'Manual mic activated');
+                          } else {
+                            setState(
+                                () => _reply = 'Look at the camera to speak');
+                          }
+                        },
                   child: Icon(_isListening ? Icons.mic_off : Icons.mic),
                 ),
                 SizedBox(height: 10),
