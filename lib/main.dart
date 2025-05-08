@@ -11,14 +11,11 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'gaze_detector.dart';
-import 'package:string_similarity/string_similarity.dart'; // Added for fuzzy matching
+import 'package:string_similarity/string_similarity.dart';
 import 'package:flutter/services.dart';
 
 const platform = MethodChannel('com.example.companion_ui/audio');
-
-// const String backendUrl = 'http://10.0.2.2:8000/api/v1/';
 const String backendUrl = 'http://192.168.1.125:8000/api/v1/';
-//const String backendUrl = 'http://192.168.1.100:8000/api/v1/';
 
 void main() {
   runApp(CompanionApp());
@@ -310,8 +307,8 @@ class _ChatScreenState extends State<ChatScreen> {
   String _lastWords = '';
   String _username = '';
   String? _accessToken;
-  String? _pendingMessage; // For queuing rapid responses
-  String? _lastTtsReply; // Store last TTS text for filtering
+  String? _pendingMessage;
+  String? _lastTtsReply;
   double? _lat;
   double? _lon;
   bool _showInput = false;
@@ -661,13 +658,13 @@ class _ChatScreenState extends State<ChatScreen> {
           _reply =
               'Speech error: ${error.errorMsg}. Check emulator audio or retry.';
           if (error.permanent && error.errorMsg != 'error_no_match') {
-            _micError = true; // Only set for non-no_match errors
+            _micError = true;
           }
         });
         Future.delayed(Duration(seconds: 2), () {
           if (mounted) {
             print('Retrying speech initialization');
-            _micError = false; // Clear micError for retry
+            _micError = false;
             _initSpeech();
           }
         });
@@ -683,7 +680,7 @@ class _ChatScreenState extends State<ChatScreen> {
       print('Speech initialization failed');
     } else {
       print('Speech initialized successfully');
-      setState(() => _micError = false); // Ensure clean start
+      setState(() => _micError = false);
     }
   }
 
@@ -693,7 +690,6 @@ class _ChatScreenState extends State<ChatScreen> {
           'Cannot start listening: isSpeaking=$_isSpeaking, micError=$_micError');
       return;
     }
-    // Mute system sounds
     try {
       print(
           'Muting system sounds at: ${DateTime.now().millisecondsSinceEpoch}');
@@ -715,7 +711,6 @@ class _ChatScreenState extends State<ChatScreen> {
         if (result.finalResult && _lastWords.isNotEmpty) {
           String message = _lastWords.trim();
           if (message.isNotEmpty && _lastTtsReply != null) {
-            // Fuzzy match against last TTS reply
             double similarity =
                 StringSimilarity.compareTwoStrings(message, _lastTtsReply!);
             print('Similarity to last TTS reply: $similarity');
@@ -751,7 +746,6 @@ class _ChatScreenState extends State<ChatScreen> {
     } else {
       setState(() => _reply = 'Failed to start listening. Retrying...');
       print('Failed to start listening');
-      // Unmute system sounds on failure
       try {
         await platform.invokeMethod('unmuteSystemSounds');
         print('System sounds unmuted after failure');
@@ -768,21 +762,15 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _stopListening() async {
     if (!_isListening) return;
-
-    // Mute system sounds
     try {
       print(
           'Muting system sounds for stop at: ${DateTime.now().millisecondsSinceEpoch}');
       await platform.invokeMethod('muteSystemSounds');
-      await _speech.stop();
       print('System sounds muted');
     } catch (e) {
       print('Error muting system sounds: $e');
     }
-
-    //await _speech.stop();
-
-    // Unmute system sounds
+    await _speech.stop();
     try {
       print(
           'Unmuting system sounds at: ${DateTime.now().millisecondsSinceEpoch}');
@@ -791,13 +779,11 @@ class _ChatScreenState extends State<ChatScreen> {
     } catch (e) {
       print('Error unmuting system sounds: $e');
     }
-
     setState(() {
       _isListening = false;
       _reply = _lastWords.isEmpty ? 'Gaze inactive' : _lastWords;
       _hasSpoken = false;
     });
-
     print('Listening stopped at: ${DateTime.now().millisecondsSinceEpoch}');
   }
 
@@ -880,25 +866,14 @@ class _ChatScreenState extends State<ChatScreen> {
           } else {
             setState(() {
               _reply = reply!;
-              _lastTtsReply = reply; // Store for filtering
+              _lastTtsReply = reply;
               _isQuestionPending = data['is_question'] ?? false;
               _isSpeaking = true;
             });
             print(
                 'Processed response: $reply, isQuestion: $_isQuestionPending');
-            if (_showCaptions) {
-              print('Speaking response: $reply');
-              await _tts.speak(reply);
-            } else {
-              print('Captions disabled, skipping TTS');
-              setState(() => _isSpeaking = false);
-              if (!_isListening &&
-                  (_isGazeActive || _isQuestionPending) &&
-                  mounted) {
-                print('Starting listening after non-TTS response');
-                _startListening();
-              }
-            }
+            print('Speaking response: $reply');
+            await _tts.speak(reply);
           }
         } catch (e) {
           setState(() {
