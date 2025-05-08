@@ -12,6 +12,7 @@ import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'gaze_detector.dart';
 import 'package:just_audio/just_audio.dart'; // Add import
+import 'package:string_similarity/string_similarity.dart'; // Added for fuzzy matching
 
 // const String backendUrl = 'http://10.0.2.2:8000/api/v1/';
 const String backendUrl = 'http://192.168.1.125:8000/api/v1/';
@@ -305,8 +306,10 @@ class _ChatScreenState extends State<ChatScreen> {
   String _units = 'imperial';
   String _formattedDateTime = '';
   String _lastWords = '';
-  String? _accessToken;
   String _username = '';
+  String? _accessToken;
+  String? _pendingMessage; // For queuing rapid responses
+  String? _lastTtsReply; // Store last TTS text for filtering
   double? _lat;
   double? _lon;
   bool _showInput = false;
@@ -320,7 +323,7 @@ class _ChatScreenState extends State<ChatScreen> {
   bool _isSpeaking = false;
   bool _isQuestionPending = false;
   bool _hasSpoken = false;
-  String? _pendingMessage; // For queuing rapid responses
+
   GazeDetector? _gazeDetector;
   Timer? _weatherTimer;
   Timer? _speechSilenceTimer;
@@ -357,7 +360,6 @@ class _ChatScreenState extends State<ChatScreen> {
             DateFormat('EEEE, MMMM d, y – hh:mm a').format(DateTime.now());
       });
     });
-    // Initialize silent audio
     _audioPlayer.setAsset('assets/silent.wav').catchError((e) {
       print('Error loading silent audio: $e');
     });
@@ -372,7 +374,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _tts.stop();
     _controller.dispose();
     _gazeDetector?.dispose();
-    _audioPlayer.dispose(); // Dispose AudioPlayer
+    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -380,7 +382,7 @@ class _ChatScreenState extends State<ChatScreen> {
     try {
       await _tts.setLanguage('en-US');
       await _tts.setSpeechRate(0.5);
-      await _tts.setPitch(0.8);
+      await _tts.setPitch(1.0);
       print('TTS initialized: language=en-US, rate=0.5, pitch=1.0');
     } catch (e) {
       print('TTS init error: $e');
@@ -389,13 +391,10 @@ class _ChatScreenState extends State<ChatScreen> {
     _tts.setCompletionHandler(() {
       setState(() => _isSpeaking = false);
       print('TTS speaking completed');
-      if ((_isGazeActive || _isQuestionPending) && !_isListening && mounted) {
+      if (!_isListening && (_isGazeActive || _isQuestionPending) && mounted) {
         print(
-            'Restarting listening after TTS completion: gaze=$_isGazeActive, questionPending=$_isQuestionPending');
+            'Starting listening after TTS completion: gaze=$_isGazeActive, questionPending=$_isQuestionPending');
         _startListening();
-      } else {
-        print(
-            'Not restarting listening: gaze=$_isGazeActive, questionPending=$_isQuestionPending');
       }
     });
     _tts.setErrorHandler((msg) {
@@ -404,8 +403,8 @@ class _ChatScreenState extends State<ChatScreen> {
         _reply = 'TTS error: $msg';
       });
       print('TTS error: $msg');
-      if ((_isGazeActive || _isQuestionPending) && !_isListening && mounted) {
-        print('Restarting listening after TTS error');
+      if (!_isListening && (_isGazeActive || _isQuestionPending) && mounted) {
+        print('Starting listening after TTS error');
         _startListening();
       }
     });
@@ -692,12 +691,11 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _startListening() async {
-    if (_isSpeaking || !mounted) {
+    if (_isSpeaking && _micError) {
       print(
-          'Cannot start listening: isSpeaking=$_isSpeaking, mounted=$mounted');
+          'Cannot start listening: isSpeaking=$_isSpeaking, micError=$_micError');
       return;
     }
-    await _speech.stop(); // Ensure clean start
     // Play silent audio to suppress system sound
     await _audioPlayer.seek(Duration.zero);
     await _audioPlayer.play();
@@ -713,15 +711,24 @@ class _ChatScreenState extends State<ChatScreen> {
         }
         if (result.finalResult && _lastWords.isNotEmpty) {
           String message = _lastWords.trim();
-          if (message.isNotEmpty) {
-            print('Sending to API: $message');
-            _sendToApi(message);
-            setState(() => _lastWords = '');
+          if (message.isNotEmpty && _lastTtsReply != null) {
+            // Fuzzy match against last TTS reply
+            double similarity =
+                StringSimilarity.compareTwoStrings(message, _lastTtsReply!);
+            print('Similarity to last TTS reply: $similarity');
+            if (similarity > 0.6) {
+              print('Ignoring self-heard TTS: $message');
+              setState(() => _lastWords = '');
+              return;
+            }
           }
+          print('Sending to API: $message');
+          _sendToApi(message);
+          setState(() => _lastWords = '');
         }
       },
-      listenFor: Duration(seconds: 60), // was 60
-      pauseFor: Duration(seconds: 5), // was 15
+      listenFor: Duration(seconds: 30),
+      pauseFor: Duration(seconds: 5),
       partialResults: true,
       onDevice: false,
       cancelOnError: true,
@@ -738,19 +745,11 @@ class _ChatScreenState extends State<ChatScreen> {
         }
       });
       print('Listening started');
-      // Process any pending message
-      if (_pendingMessage != null && mounted) {
-        String queuedMessage = _pendingMessage!;
-        _pendingMessage = null;
-        print('Processing queued message: $queuedMessage');
-        _sendToApi(queuedMessage);
-      }
     } else {
       setState(() => _reply = 'Failed to start listening. Retrying...');
       print('Failed to start listening');
-      Future.delayed(Duration(seconds: 2), () {
-        // was milliseconds: 500
-        if (mounted && !_isSpeaking && (_isGazeActive || _isQuestionPending)) {
+      Future.delayed(Duration(milliseconds: 500), () {
+        if (mounted && !_micError && (_isGazeActive || _isQuestionPending)) {
           _startListening();
         }
       });
@@ -759,7 +758,6 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _stopListening() async {
     if (!_isListening) return;
-    await _speech.stop();
     // Play silent audio to suppress system sound
     await _audioPlayer.seek(Duration.zero);
     await _audioPlayer.play();
@@ -773,12 +771,6 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   Future<void> _sendToApi(String text) async {
-    // Queue message if already processing
-    if (_isListening && _isSpeaking) {
-      _pendingMessage = text;
-      print('Queuing message: $text');
-      return;
-    }
     print(
         'sendToApi called with text: "$text", username: "$_username", token: ${_accessToken != null ? "valid" : "null"}');
     final prefs = await SharedPreferences.getInstance();
@@ -848,38 +840,31 @@ class _ChatScreenState extends State<ChatScreen> {
             });
             print(
                 'No valid response field in API response. Checked keys: response, reply, message, text');
-            // Resume listening if gaze active or question pending
             if ((_isGazeActive || _isQuestionPending) &&
                 !_isListening &&
                 mounted) {
-              print('Resuming listening after empty response');
+              print('Starting listening after empty response');
               _startListening();
             }
           } else {
             setState(() {
               _reply = reply!;
+              _lastTtsReply = reply; // Store for filtering
               _isQuestionPending = data['is_question'] ?? false;
               _isSpeaking = true;
             });
             print(
                 'Processed response: $reply, isQuestion: $_isQuestionPending');
             if (_showCaptions) {
-              // Stop listening before speaking to prevent capturing TTS
-              if (_isListening) {
-                await _stopListening();
-                print('Stopped listening before TTS');
-              }
               print('Speaking response: $reply');
               await _tts.speak(reply);
-              // Listening resumes in TTS completion handler
             } else {
               print('Captions disabled, skipping TTS');
               setState(() => _isSpeaking = false);
-              // Resume listening if gaze active or question pending
-              if ((_isGazeActive || _isQuestionPending) &&
-                  !_isListening &&
+              if (!_isListening &&
+                  (_isGazeActive || _isQuestionPending) &&
                   mounted) {
-                print('Resuming listening after non-TTS response');
+                print('Starting listening after non-TTS response');
                 _startListening();
               }
             }
@@ -891,11 +876,10 @@ class _ChatScreenState extends State<ChatScreen> {
             _isSpeaking = false;
           });
           print('JSON parse error: $e');
-          // Resume listening if gaze active or question pending
-          if ((_isGazeActive || _isQuestionPending) &&
-              !_isListening &&
+          if (!_isListening &&
+              (_isGazeActive || _isQuestionPending) &&
               mounted) {
-            print('Resuming listening after parse error');
+            print('Starting listening after parse error');
             _startListening();
           }
         }
@@ -909,9 +893,8 @@ class _ChatScreenState extends State<ChatScreen> {
           _isSpeaking = false;
         });
         print('API error: ${response.statusCode} ${response.body}');
-        // Resume listening if gaze active or question pending
-        if ((_isGazeActive || _isQuestionPending) && !_isListening && mounted) {
-          print('Resuming listening after API error');
+        if (!_isListening && (_isGazeActive || _isQuestionPending) && mounted) {
+          print('Starting listening after API error');
           _startListening();
         }
       }
@@ -921,9 +904,8 @@ class _ChatScreenState extends State<ChatScreen> {
         _isSpeaking = false;
       });
       print('API network error: $e');
-      // Resume listening if gaze active or question pending
-      if ((_isGazeActive || _isQuestionPending) && !_isListening && mounted) {
-        print('Resuming listening after network error');
+      if (!_isListening && (_isGazeActive || _isQuestionPending) && mounted) {
+        print('Starting listening after network error');
         _startListening();
       }
     }
