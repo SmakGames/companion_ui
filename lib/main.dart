@@ -11,8 +11,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:flutter_tts/flutter_tts.dart';
 import 'gaze_detector.dart';
-import 'package:just_audio/just_audio.dart'; // Add import
 import 'package:string_similarity/string_similarity.dart'; // Added for fuzzy matching
+import 'package:flutter/services.dart';
+
+const platform = MethodChannel('com.example.companion_ui/audio');
 
 // const String backendUrl = 'http://10.0.2.2:8000/api/v1/';
 const String backendUrl = 'http://192.168.1.125:8000/api/v1/';
@@ -329,7 +331,6 @@ class _ChatScreenState extends State<ChatScreen> {
   Timer? _speechSilenceTimer;
   Timer? _gazeFailureTimer;
   final FlutterTts _tts = FlutterTts();
-  final AudioPlayer _audioPlayer = AudioPlayer(); // Add AudioPlayer
 
   @override
   void initState() {
@@ -360,9 +361,6 @@ class _ChatScreenState extends State<ChatScreen> {
             DateFormat('EEEE, MMMM d, y – hh:mm a').format(DateTime.now());
       });
     });
-    _audioPlayer.setAsset('assets/silent.wav').catchError((e) {
-      print('Error loading silent audio: $e');
-    });
   }
 
   @override
@@ -374,7 +372,6 @@ class _ChatScreenState extends State<ChatScreen> {
     _tts.stop();
     _controller.dispose();
     _gazeDetector?.dispose();
-    _audioPlayer.dispose();
     super.dispose();
   }
 
@@ -696,9 +693,15 @@ class _ChatScreenState extends State<ChatScreen> {
           'Cannot start listening: isSpeaking=$_isSpeaking, micError=$_micError');
       return;
     }
-    // Play silent audio to suppress system sound
-    await _audioPlayer.seek(Duration.zero);
-    await _audioPlayer.play();
+    // Mute system sounds
+    try {
+      print(
+          'Muting system sounds at: ${DateTime.now().millisecondsSinceEpoch}');
+      await platform.invokeMethod('muteSystemSounds');
+      print('System sounds muted');
+    } catch (e) {
+      print('Error muting system sounds: $e');
+    }
     bool available = await _speech.listen(
       onResult: (result) {
         setState(() {
@@ -748,6 +751,13 @@ class _ChatScreenState extends State<ChatScreen> {
     } else {
       setState(() => _reply = 'Failed to start listening. Retrying...');
       print('Failed to start listening');
+      // Unmute system sounds on failure
+      try {
+        await platform.invokeMethod('unmuteSystemSounds');
+        print('System sounds unmuted after failure');
+      } catch (e) {
+        print('Error unmuting system sounds: $e');
+      }
       Future.delayed(Duration(milliseconds: 500), () {
         if (mounted && !_micError && (_isGazeActive || _isQuestionPending)) {
           _startListening();
@@ -758,16 +768,37 @@ class _ChatScreenState extends State<ChatScreen> {
 
   Future<void> _stopListening() async {
     if (!_isListening) return;
-    // Play silent audio to suppress system sound
-    await _audioPlayer.seek(Duration.zero);
-    await _audioPlayer.play();
-    await _speech.stop();
+
+    // Mute system sounds
+    try {
+      print(
+          'Muting system sounds for stop at: ${DateTime.now().millisecondsSinceEpoch}');
+      await platform.invokeMethod('muteSystemSounds');
+      await _speech.stop();
+      print('System sounds muted');
+    } catch (e) {
+      print('Error muting system sounds: $e');
+    }
+
+    //await _speech.stop();
+
+    // Unmute system sounds
+    try {
+      print(
+          'Unmuting system sounds at: ${DateTime.now().millisecondsSinceEpoch}');
+      await platform.invokeMethod('unmuteSystemSounds');
+      print('System sounds unmuted');
+    } catch (e) {
+      print('Error unmuting system sounds: $e');
+    }
+
     setState(() {
       _isListening = false;
       _reply = _lastWords.isEmpty ? 'Gaze inactive' : _lastWords;
       _hasSpoken = false;
     });
-    print('Listening stopped');
+
+    print('Listening stopped at: ${DateTime.now().millisecondsSinceEpoch}');
   }
 
   Future<void> _sendToApi(String text) async {

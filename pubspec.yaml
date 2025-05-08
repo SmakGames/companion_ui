@@ -40,7 +40,7 @@ dependencies:
   image: ^4.2.0
   process: ^4.2.4
   permission_handler: ^11.3.3
-  just_audio: ^0.10.2
+  #just_audio: ^0.10.2
   string_similarity: ^2.1.1
 
 

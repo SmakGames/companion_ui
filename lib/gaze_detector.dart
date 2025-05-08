@@ -21,9 +21,9 @@ class GazeDetectorImpl implements GazeDetector {
   int _frameCount = 0;
   int _gazeOnCount = 0;
   int _gazeOffCount = 0;
-  static const int _frameSkip = 3; // ~10 FPS at 30 FPS
-  static const int _debounceFrames = 5; // ~0.5s to confirm gaze
-  static const int _faceLossTimeoutFrames = 5; // ~0.5s to lose gaze
+  static const int _frameSkip = 5; // ~6 FPS at 30 FPS for stability
+  static const int _debounceFrames = 3; // ~0.5s to confirm gaze
+  static const int _faceLossTimeoutFrames = 6; // ~1s to lose gaze
   int? _trackedFaceId; // Track the primary face
 
   GazeDetectorImpl() {
@@ -33,7 +33,7 @@ class GazeDetectorImpl implements GazeDetector {
         enableLandmarks: true,
         enableTracking: true,
         performanceMode: FaceDetectorMode.fast,
-        minFaceSize: 0.05,
+        minFaceSize: 0.1, // Slightly larger for reliability
       ),
     );
   }
@@ -44,7 +44,7 @@ class GazeDetectorImpl implements GazeDetector {
       final cameras = await availableCameras();
       if (cameras.isEmpty) {
         print('No cameras available');
-        throw Exception('No cameras found. Check emulator webcam settings.');
+        throw Exception('No cameras found. Check device camera settings.');
       }
       final frontCamera = cameras.firstWhere(
         (camera) => camera.lensDirection == CameraLensDirection.front,
@@ -55,7 +55,7 @@ class GazeDetectorImpl implements GazeDetector {
           'Sensor: ${frontCamera.sensorOrientation}');
       _cameraController = CameraController(
         frontCamera,
-        ResolutionPreset.medium, // 720x480
+        ResolutionPreset.low, // 320x240 or similar for faster processing
         enableAudio: false,
       );
       await _cameraController!.initialize();
@@ -63,7 +63,7 @@ class GazeDetectorImpl implements GazeDetector {
           'Resolution: ${_cameraController!.value.previewSize}');
     } catch (e) {
       print('Camera init error: $e');
-      throw Exception('Camera error: $e. Check permissions and webcam.');
+      throw Exception('Camera error: $e. Check permissions and camera.');
     }
   }
 
@@ -116,13 +116,12 @@ class GazeDetectorImpl implements GazeDetector {
               'HeadYaw: $headYaw, TrackingID: ${selectedFace.trackingId}');
           newGazeState = leftEye != null &&
               rightEye != null &&
-              leftEye > 0.2 &&
-              rightEye > 0.2 &&
-              headYaw.abs() < 20.0;
+              leftEye > 0.3 && // Slightly stricter for reliability
+              rightEye > 0.3 &&
+              headYaw.abs() < 25.0; // Slightly relaxed
         } else {
-          print(
-              'No faces detected. Check: resolution, lighting, distance (~18in), '
-              'webcam focus, or facial hair interference.');
+          print('No faces detected. Check: lighting, distance (~18in), '
+              'camera focus, or obstructions.');
           _trackedFaceId = null; // Reset tracking if no faces
         }
         if (newGazeState) {
@@ -177,11 +176,12 @@ class GazeDetectorImpl implements GazeDetector {
 
   InputImage _convertCameraImage(CameraImage image) {
     try {
-      final width = image.width;
-      final height = image.height;
+      final width = image.width; // 720
+      final height = image.height; // 480
       final format = image.format.group;
+      final bytesPerRow = image.planes[0].bytesPerRow; // 768
       print('Image: ${width}x${height}, Format: $format, '
-          'BytesPerRow: ${image.planes[0].bytesPerRow}');
+          'BytesPerRow: $bytesPerRow');
       if (format != ImageFormatGroup.yuv420) {
         print('Unsupported image format: $format');
         throw Exception('Unsupported image format: $format');
@@ -194,20 +194,52 @@ class GazeDetectorImpl implements GazeDetector {
       final vBytes = vPlane.bytes;
       print(
           'Plane sizes: Y=${yBytes.length}, U=${uBytes.length}, V=${vBytes.length}');
-      // NV21 format: Y plane followed by interleaved V/U
-      final totalSize = yBytes.length + (uBytes.length * 2);
+
+      // Expected sizes for YUV420
+      final expectedYSize = width * height; // 720 * 480 = 345600
+      final expectedUVSize = (width ~/ 2) * (height ~/ 2); // 360 * 240 = 86400
+      print(
+          'Expected sizes: Y=$expectedYSize, U=$expectedUVSize, V=$expectedUVSize');
+
+      // Crop Y plane to remove padding
+      final croppedY = Uint8List(expectedYSize);
+      for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+          croppedY[y * width + x] = yBytes[y * bytesPerRow + x];
+        }
+      }
+
+      // Crop U and V planes (half resolution)
+      final uvBytesPerRow = uPlane.bytesPerRow; // Likely 384
+      final croppedU = Uint8List(expectedUVSize);
+      final croppedV = Uint8List(expectedUVSize);
+      for (int y = 0; y < height ~/ 2; y++) {
+        for (int x = 0; x < width ~/ 2; x++) {
+          croppedU[y * (width ~/ 2) + x] = uBytes[y * uvBytesPerRow + x];
+          croppedV[y * (width ~/ 2) + x] = vBytes[y * uvBytesPerRow + x];
+        }
+      }
+
+      // Construct NV21: Y followed by interleaved V/U
+      final totalSize =
+          expectedYSize + 2 * expectedUVSize; // 345600 + 2 * 86400 = 518400
       final bytes = Uint8List(totalSize);
       int offset = 0;
       // Copy Y plane
-      bytes.setRange(offset, offset + yBytes.length, yBytes);
-      offset += yBytes.length;
-      // Interleave V and U planes
-      for (int i = 0; i < uBytes.length; i++) {
-        bytes[offset++] = vBytes[i]; // V
-        bytes[offset++] = uBytes[i]; // U
+      bytes.setRange(offset, offset + croppedY.length, croppedY);
+      offset += croppedY.length;
+      // Interleave V and U
+      for (int i = 0; i < croppedU.length; i++) {
+        bytes[offset++] = croppedV[i]; // V
+        bytes[offset++] = croppedU[i]; // U
       }
-      print(
-          'ByteBuffer size: ${bytes.length}, Expected: ${width * height * 3 ~/ 2}');
+
+      print('NV21 ByteBuffer size: ${bytes.length}, Expected: $totalSize');
+      if (bytes.length != totalSize) {
+        throw Exception(
+            'NV21 buffer size mismatch: got ${bytes.length}, expected $totalSize');
+      }
+
       // Determine rotation based on camera sensor orientation
       final sensorOrientation =
           _cameraController!.description.sensorOrientation;
@@ -226,13 +258,14 @@ class GazeDetectorImpl implements GazeDetector {
           rotation = InputImageRotation.rotation0deg;
       }
       print('Sensor orientation: $sensorOrientation, Rotation: $rotation');
+
       return InputImage.fromBytes(
         bytes: bytes,
         metadata: InputImageMetadata(
           size: Size(width.toDouble(), height.toDouble()),
           rotation: rotation,
           format: InputImageFormat.nv21,
-          bytesPerRow: yPlane.bytesPerRow,
+          bytesPerRow: width, // Use unpadded width for NV21
         ),
       );
     } catch (e) {
