@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_tts/flutter_tts.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
@@ -9,16 +11,61 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:process/process.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
-import 'package:flutter_tts/flutter_tts.dart';
-import 'gaze_detector.dart';
 import 'package:string_similarity/string_similarity.dart';
-import 'package:flutter/services.dart';
+import 'package:video_player/video_player.dart';
+import 'gaze_detector.dart';
 
 const platform = MethodChannel('com.example.companion_ui/audio');
 const String backendUrl = 'http://192.168.1.125:8000/api/v1/';
 
 void main() {
   runApp(CompanionApp());
+}
+
+class VideoBackground extends StatefulWidget {
+  const VideoBackground({Key? key}) : super(key: key);
+
+  @override
+  State<VideoBackground> createState() => _VideoBackgroundState();
+}
+
+class _VideoBackgroundState extends State<VideoBackground> {
+  late VideoPlayerController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+
+    _controller = VideoPlayerController.asset('assets/room_background.mp4')
+      ..setLooping(true)
+      ..setVolume(0.0) // Mute the video
+      ..initialize().then((_) {
+        setState(() {}); // Refresh when video is ready
+        _controller.play(); // Start playing
+      });
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return _controller.value.isInitialized
+        ? SizedBox.expand(
+            child: FittedBox(
+              fit: BoxFit.cover,
+              child: SizedBox(
+                width: _controller.value.size.width,
+                height: _controller.value.size.height,
+                child: VideoPlayer(_controller),
+              ),
+            ),
+          )
+        : Container(color: Colors.black); // Placeholder while loading
+  }
 }
 
 class CompanionApp extends StatelessWidget {
@@ -1005,15 +1052,7 @@ class _ChatScreenState extends State<ChatScreen> {
     return Scaffold(
       body: Stack(
         children: [
-          Container(
-            decoration: BoxDecoration(
-              image: DecorationImage(
-                image: AssetImage(
-                    'assets/room_${weatherBg}_${isDay ? 'day' : 'night'}.png'),
-                fit: BoxFit.cover,
-              ),
-            ),
-          ),
+          const VideoBackground(),
           Align(
             alignment: Alignment.bottomCenter,
             child: Image.asset('assets/companion.png'),
