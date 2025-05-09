@@ -313,7 +313,7 @@ class _ChatScreenState extends State<ChatScreen> {
   double? _lon;
   bool _showInput = false;
   bool _isListening = false;
-  bool _showCaptions = true;
+  bool _showCaptions = false;
   bool _isGazeActive = false;
   bool _isGazeEnabled = true;
   bool _gazeDetectionFailed = false;
@@ -542,8 +542,8 @@ class _ChatScreenState extends State<ChatScreen> {
               ? 'Welcome, $_preferredName!'
               : 'Welcome!';
         });
-        print('Speaking welcome message: Welcome $_preferredName');
-        await _tts.speak('Welcome $_preferredName! I am happy to see you.');
+        print('Speaking welcome message: Hi $_preferredName');
+        await _tts.speak('Hi $_preferredName! I am happy to see you.');
       } else if (response.statusCode == 401) {
         await _refreshToken();
         await _fetchUserProfile();
@@ -615,7 +615,7 @@ class _ChatScreenState extends State<ChatScreen> {
       _preferredName = prefs.getString('preferred_name') ?? '';
       _city = prefs.getString('city') ?? 'Boston';
       _accountStatus = prefs.getString('account_status') ?? 'active';
-      _showCaptions = prefs.getBool('show_captions') ?? true;
+      _showCaptions = prefs.getBool('show_captions') ?? false;
       _isGazeEnabled = prefs.getBool('gaze_enabled') ?? true;
     });
     print(
@@ -984,6 +984,9 @@ class _ChatScreenState extends State<ChatScreen> {
     }
   }
 
+  //
+  // The main UI Scaffold
+  //
   @override
   Widget build(BuildContext context) {
     final time = DateTime.now();
@@ -1062,12 +1065,12 @@ class _ChatScreenState extends State<ChatScreen> {
                     'Listening',
                     style: TextStyle(fontSize: 24, color: Colors.blue),
                   ),
-                if (_gazeDetectionFailed)
+                if (_gazeDetectionFailed && _showCaptions)
                   Text(
                     'Gaze detection unavailable. Check camera, lighting, or use manual mic.',
                     style: TextStyle(fontSize: 24, color: Colors.red),
                   ),
-                if (_micError)
+                if (_micError && _showCaptions)
                   Text(
                     'Microphone unavailable. Check emulator audio, permissions, or retry.',
                     style: TextStyle(fontSize: 24, color: Colors.red),
@@ -1450,6 +1453,9 @@ class _SettingsScreenState extends State<SettingsScreen> {
     }
   }
 
+  //
+  // The settings screen Scaffold
+  //
   @override
   Widget build(BuildContext context) {
     return Scaffold(
