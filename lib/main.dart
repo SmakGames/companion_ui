@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:companion_ui/api_key.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_tts/flutter_tts.dart';
@@ -13,7 +14,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:speech_to_text/speech_to_text.dart';
 import 'package:string_similarity/string_similarity.dart';
 import 'package:video_player/video_player.dart';
+
+//import 'package:audioplayers/audioplayers.dart';
+//import 'package:cloud_text_to_speech/cloud_text_to_speech.dart';
+
 import 'gaze_detector.dart';
+import 'robot_companion.dart'; // Add this import
 
 const platform = MethodChannel('com.example.companion_ui/audio');
 const String backendUrl = 'http://192.168.1.125:8000/api/v1/';
@@ -375,6 +381,8 @@ class _ChatScreenState extends State<ChatScreen> {
   Timer? _speechSilenceTimer;
   Timer? _gazeFailureTimer;
   final FlutterTts _tts = FlutterTts();
+  //late TtsGoogle _tts;
+  //final AudioPlayer _audioPlayer = AudioPlayer();
 
   @override
   void initState() {
@@ -414,6 +422,7 @@ class _ChatScreenState extends State<ChatScreen> {
     _speechSilenceTimer?.cancel();
     _speech.stop();
     _tts.stop();
+    //_audioPlayer.dispose();
     _controller.dispose();
     _gazeDetector?.dispose();
     super.dispose();
@@ -1055,7 +1064,10 @@ class _ChatScreenState extends State<ChatScreen> {
           const VideoBackground(),
           Align(
             alignment: Alignment.bottomCenter,
-            child: Image.asset('assets/companion.png'),
+            child: RobotCompanion(
+              isListening: _isListening,
+              isSpeaking: _isSpeaking,
+            ),
           ),
           Positioned(
             top: 20,

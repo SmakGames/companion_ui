@@ -42,6 +42,8 @@ dependencies:
   permission_handler: ^11.3.3
   #just_audio: ^0.10.2
   string_similarity: ^2.1.1
+  #audioplayers: ^5.2.1 # For playing Google TTS audio
+  #cloud_text_to_speech: ^2.3.2 # Google Cloud TTS
 
 
   # The following adds the Cupertino Icons font to your application.
@@ -50,6 +52,7 @@ dependencies:
   google_ml_kit: ^0.20.0
   google_mlkit_commons: ^0.11.0
   google_mlkit_face_detection: ^0.13.1
+  video_player: ^2.9.5
 
 dev_dependencies:
   flutter_test:
@@ -111,3 +114,7 @@ flutter:
     - assets/room_sunny_night.png
     - assets/companion.png
     - assets/silent.wav
+    - assets/room_background.mp4
+    - assets/robot_base.png
+    - assets/eyes_opened.png
+    - assets/eyes_closed.png
