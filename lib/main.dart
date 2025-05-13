@@ -1061,7 +1061,15 @@ class _ChatScreenState extends State<ChatScreen> {
     return Scaffold(
       body: Stack(
         children: [
-          const VideoBackground(),
+          Container(
+            decoration: BoxDecoration(
+              image: DecorationImage(
+                image: AssetImage(
+                    'assets/room_${weatherBg}_${isDay ? 'day' : 'night'}.png'),
+                fit: BoxFit.cover,
+              ),
+            ),
+          ),
           Align(
             alignment: Alignment.bottomCenter,
             child: RobotCompanion(
